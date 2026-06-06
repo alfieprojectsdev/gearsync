@@ -4,12 +4,11 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.RectF
-import android.graphics.SweepGradient
 import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.View
+import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
@@ -17,13 +16,13 @@ import kotlin.math.sin
 /**
  * Analog VU-meter needle view driven by native C++ state at 60 FPS.
  *
- * Three arc zones sweep from 225° (bottom-left) to 315° (bottom-right):
+ * Three arc zones sweep from 135° (bottom-left) to 45° (top-right), clockwise,
+ * covering SWEEP_ANGLE = 270° in Android's Canvas coordinate system (0° = east):
  *   Lugging   0 %–33 %   blue
  *   Optimal  33 %–66 %   green
  *   Redline  66 %–100 %  red
  *
- * Zone boundaries and SHIFT_THRESHOLD are derived from gear calibration
- * confidence returned in getVUMeterState()[4].
+ * Zone boundaries and confidence are derived from getVUMeterState()[4].
  */
 class VUMeterView @JvmOverloads constructor(
     context: Context,
@@ -79,6 +78,7 @@ class VUMeterView @JvmOverloads constructor(
     // ─── 60 FPS loop via Choreographer ───────────────────────────────────────
 
     private val choreographer = Choreographer.getInstance()
+    private var isRunning     = false
 
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
@@ -92,19 +92,34 @@ class VUMeterView @JvmOverloads constructor(
             }
             smoothNeedle += smoothAlpha * (needlePos - smoothNeedle)
             invalidate()
-            choreographer.postFrameCallback(this)
+            if (isRunning) choreographer.postFrameCallback(this)
         }
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         setLayerType(LAYER_TYPE_HARDWARE, null)
-        choreographer.postFrameCallback(frameCallback)
+        if (visibility == VISIBLE) {
+            isRunning = true
+            choreographer.postFrameCallback(frameCallback)
+        }
     }
 
     override fun onDetachedFromWindow() {
+        isRunning = false
         choreographer.removeFrameCallback(frameCallback)
         super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (visibility == VISIBLE && !isRunning) {
+            isRunning = true
+            choreographer.postFrameCallback(frameCallback)
+        } else if (visibility != VISIBLE && isRunning) {
+            isRunning = false
+            choreographer.removeFrameCallback(frameCallback)
+        }
     }
 
     // ─── Drawing ─────────────────────────────────────────────────────────────
@@ -113,7 +128,6 @@ class VUMeterView @JvmOverloads constructor(
         val cx   = width  / 2f
         val cy   = height / 2f
         val r    = min(cx, cy) * 0.82f
-        val half = ARC_WIDTH / 2f
 
         arcRect.set(cx - r, cy - r, cx + r, cy + r)
 
@@ -126,8 +140,8 @@ class VUMeterView @JvmOverloads constructor(
         canvas.drawArc(arcRect, START_ANGLE + third,   third, false, arcPaintOpt)
         canvas.drawArc(arcRect, START_ANGLE + 2*third, third, false, arcPaintRed)
 
-        // Needle
-        val needleAngle = Math.toRadians((START_ANGLE + smoothNeedle * SWEEP_ANGLE).toDouble())
+        // Needle — use kotlin.math.PI for idiomatic conversion from degrees
+        val needleAngle = (START_ANGLE + smoothNeedle * SWEEP_ANGLE) * PI / 180.0
         val nx = (cx + r * cos(needleAngle)).toFloat()
         val ny = (cy + r * sin(needleAngle)).toFloat()
         val innerR = r * 0.30f
@@ -144,7 +158,7 @@ class VUMeterView @JvmOverloads constructor(
         val gearText = if (gear > 0) "GEAR $gear" else "—"
         canvas.drawText(gearText, cx, cy + r * 0.55f, valuePaint)
 
-        // Hz / speed readout below
+        // Hz readout below
         val hzText = if (dominantHz > 0f) "${dominantHz.toInt()} Hz" else "···"
         canvas.drawText(hzText, cx, cy + r * 0.78f, labelPaint)
 

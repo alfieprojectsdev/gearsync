@@ -78,8 +78,7 @@ class ShiftAssistantService : Service() {
 
     private fun restoreCalibrationState() {
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        val len   = 8   // 3 Welford fields + 5 gear ratios
-        val array = FloatArray(len) { i -> prefs.getFloat("cal_$i", 0f) }
+        val array = FloatArray(CALIBRATION_STATE_LEN) { i -> prefs.getFloat("cal_$i", 0f) }
         if (array[0] > 0f) {   // n > 0 means we have prior data
             NativeEngine.resumeCalibrationState(array)
         }
@@ -115,8 +114,10 @@ class ShiftAssistantService : Service() {
     }
 
     companion object {
-        private const val NOTIFICATION_ID = 1
-        private const val CHANNEL_ID      = "gearsync_fg"
-        private const val PREFS_NAME      = "gearsync_calibration"
+        private const val NOTIFICATION_ID        = 1
+        private const val CHANNEL_ID             = "gearsync_fg"
+        private const val PREFS_NAME             = "gearsync_calibration"
+        // Must stay in sync with native: 3 Welford fields + NUM_GEARS (5) gear ratios.
+        private const val CALIBRATION_STATE_LEN  = 8
     }
 }

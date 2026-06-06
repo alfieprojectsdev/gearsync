@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
-#include <cstdlib>
+#include <numeric>
 
 void CalibrationEngine::updateWelford(float ratio) {
     std::lock_guard<std::mutex> lk(m_mutex);
@@ -16,9 +16,12 @@ void CalibrationEngine::updateWelford(float ratio) {
 
     m_ratioSamples.push_back(ratio);
 
-    if (static_cast<int>(m_ratioSamples.size()) >= MIN_SAMPLES_FOR_KMEANS &&
-        m_state.n % KMEANS_UPDATE_INTERVAL == 0) {
+    // Use (n - lastRun) so the interval is consistent even after deserialise restores
+    // an arbitrary n, which would otherwise cause the plain `n % interval` check to skip.
+    if (m_state.n >= MIN_SAMPLES_FOR_KMEANS &&
+        (m_state.n - m_lastKMeansSample) % KMEANS_UPDATE_INTERVAL == 0) {
         runKMeansInternal(m_ratioSamples);
+        m_lastKMeansSample = m_state.n;
     }
 }
 
@@ -69,19 +72,34 @@ void CalibrationEngine::serialise(float* out, int len) const {
 void CalibrationEngine::deserialise(const float* in, int len) {
     if (len < 3 + NUM_GEARS) return;
     std::lock_guard<std::mutex> lk(m_mutex);
+
     m_state.n    = static_cast<int>(in[0]);
     m_state.mean = in[1];
     m_state.m2   = in[2];
     for (int g = 0; g < NUM_GEARS; ++g) m_gearRatios[g] = in[3 + g];
-    m_calibrated = (m_state.n >= MIN_SAMPLES_FOR_KMEANS);
+
+    // Validate that at least one gear ratio is non-zero; corrupted storage
+    // (all-zero ratios) would make classifyGear return nonsensical results.
+    bool hasValidRatios = false;
+    for (int g = 0; g < NUM_GEARS; ++g) {
+        if (std::fabs(m_gearRatios[g]) > 1e-6f) { hasValidRatios = true; break; }
+    }
+    m_calibrated = (m_state.n >= MIN_SAMPLES_FOR_KMEANS) && hasValidRatios;
+
+    // Clear the in-session sample vector (it is not serialised) and reset the
+    // K-Means trigger baseline so the next KMEANS_UPDATE_INTERVAL new samples
+    // fire a run rather than skipping due to an arbitrary restored n.
+    m_ratioSamples.clear();
+    m_lastKMeansSample = m_state.n;
 }
 
 void CalibrationEngine::reset() {
     std::lock_guard<std::mutex> lk(m_mutex);
-    m_state      = {};
-    m_gearRatios = {};
+    m_state             = {};
+    m_gearRatios        = {};
     m_ratioSamples.clear();
-    m_calibrated = false;
+    m_calibrated        = false;
+    m_lastKMeansSample  = 0;
 }
 
 void CalibrationEngine::runKMeans() {
@@ -89,18 +107,20 @@ void CalibrationEngine::runKMeans() {
     runKMeansInternal(m_ratioSamples);
 }
 
-// 1-D K-Means with k=5, k-means++ seeding. Caller must hold m_mutex.
+// 1-D K-Means with farthest-first initialisation (deterministic max-distance
+// heuristic — simpler than probabilistic k-means++ and well-suited to 1-D data).
+// Caller must hold m_mutex.
 void CalibrationEngine::runKMeansInternal(std::vector<float>& samples) {
     const int n = static_cast<int>(samples.size());
     if (n < NUM_GEARS) return;
 
     float centroids[NUM_GEARS] = {};
 
-    // k-means++ initialisation: pick first centroid randomly, then each next
-    // centroid with probability proportional to the squared distance from the
-    // nearest existing centroid.
-    centroids[0] = samples[static_cast<std::size_t>(std::rand()) % samples.size()];
+    // Pick first centroid uniformly at random using the engine-local mt19937.
+    std::uniform_int_distribution<std::size_t> dist(0, samples.size() - 1);
+    centroids[0] = samples[dist(m_rng)];
 
+    // Each subsequent centroid is the sample farthest from all existing ones.
     for (int k = 1; k < NUM_GEARS; ++k) {
         float maxDist = -1.0f;
         for (float s : samples) {
@@ -139,7 +159,7 @@ void CalibrationEngine::runKMeansInternal(std::vector<float>& samples) {
         if (converged) break;
     }
 
-    // Sort descending so index 0 = gear 1 (highest ratio = lowest speed gear).
+    // Sort descending: index 0 = gear 1 (highest ratio = lowest speed gear).
     std::sort(centroids, centroids + NUM_GEARS, std::greater<float>());
     for (int g = 0; g < NUM_GEARS; ++g) m_gearRatios[g] = centroids[g];
     m_calibrated = true;

@@ -3,4 +3,7 @@
     <string name="app_name">GearSync</string>
     <string name="btn_start">Start</string>
     <string name="btn_stop">Stop</string>
+    <string name="service_started">GearSync started</string>
+    <string name="service_stopped">GearSync stopped</string>
+    <string name="permissions_required">Permissions required: %1$s</string>
 </resources>

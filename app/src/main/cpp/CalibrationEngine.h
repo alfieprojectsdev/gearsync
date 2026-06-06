@@ -2,6 +2,7 @@
 
 #include <array>
 #include <mutex>
+#include <random>
 #include <vector>
 
 static constexpr int NUM_GEARS = 5;
@@ -53,5 +54,7 @@ private:
     WelfordState                    m_state;
     std::vector<float>              m_ratioSamples;
     std::array<float, NUM_GEARS>    m_gearRatios = {};
-    bool                            m_calibrated = false;
+    bool                            m_calibrated        = false;
+    int                             m_lastKMeansSample  = 0;   // n at last K-Means run
+    std::mt19937                    m_rng{std::random_device{}()};
 };

@@ -23,7 +23,6 @@
                           C12.55,11 13,11.45 13,12
                           C13,12.55 12.55,13 12,13Z" />
     <path
-        android:fillColor="#FFFFFF"
         android:strokeColor="#FFFFFF"
         android:strokeWidth="1.5"
         android:pathData="M12,12 L7,7" />

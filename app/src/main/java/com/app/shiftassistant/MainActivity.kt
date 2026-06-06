@@ -25,7 +25,11 @@ class MainActivity : AppCompatActivity() {
     ) { grants ->
         val denied = grants.filterValues { !it }.keys
         if (denied.isEmpty()) startShiftService()
-        else Toast.makeText(this, "Permissions required: $denied", Toast.LENGTH_LONG).show()
+        else Toast.makeText(
+            this,
+            getString(R.string.permissions_required, denied.joinToString()),
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,11 +51,11 @@ class MainActivity : AppCompatActivity() {
     private fun startShiftService() {
         val intent = Intent(this, ShiftAssistantService::class.java)
         ContextCompat.startForegroundService(this, intent)
-        Toast.makeText(this, "GearSync started", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, R.string.service_started, Toast.LENGTH_SHORT).show()
     }
 
     private fun stopShiftService() {
         stopService(Intent(this, ShiftAssistantService::class.java))
-        Toast.makeText(this, "GearSync stopped", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, R.string.service_stopped, Toast.LENGTH_SHORT).show()
     }
 }

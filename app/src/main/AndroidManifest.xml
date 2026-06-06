@@ -19,8 +19,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.GearSync"
-        tools:targetApi="34">
+        android:theme="@style/Theme.GearSync">
 
         <activity
             android:name=".MainActivity"

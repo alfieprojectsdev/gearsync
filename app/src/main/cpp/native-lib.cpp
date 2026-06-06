@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstring>
@@ -34,18 +35,29 @@ static constexpr int   SENSOR_US          = 10000;  // 100 Hz
 
 // ─── Shared state (atomic where possible) ────────────────────────────────────
 
-static std::atomic<float> g_gpsSpeed{0.0f};           // metres per second from GPS
-static std::atomic<float> g_dominantHz{0.0f};         // last FFT peak
-static std::atomic<float> g_needlePos{0.0f};          // 0.0 (lug) … 1.0 (redline)
-static std::atomic<int>   g_currentGear{-1};          // 0-based gear index, -1 = unknown
-static std::atomic<bool>  g_triggerBlip{false};       // request blip on next output frame
-static std::atomic<float> g_audioCueFrequency{14200.0f}; // synthesized blip frequency in Hz
+static std::atomic<float>    g_gpsSpeed{0.0f};            // metres per second from GPS
+static std::atomic<float>    g_dominantHz{0.0f};          // last FFT peak
+static std::atomic<float>    g_needlePos{0.0f};           // 0.0 (lug) … 1.0 (redline)
+static std::atomic<int>      g_currentGear{-1};           // 0-based gear index, -1 = unknown
+static std::atomic<bool>     g_triggerBlip{false};        // request blip on next output frame
+static std::atomic<float>    g_audioCueFrequency{14200.0f}; // synthesized blip frequency in Hz
 
 // ─── PCM ring buffer ──────────────────────────────────────────────────────────
+// Written exclusively by the audio input callback — no mutex required.
 
-static float        g_pcmRing[FFT_SIZE]{};
-static int          g_pcmHead = 0;
-static std::mutex   g_pcmMutex;
+static float     g_pcmRing[FFT_SIZE]{};
+static uint32_t  g_pcmHead = 0;   // uint32_t: wraps at 2^32, well-defined, ~25 hours at 48 kHz
+
+// ─── DSP worker handoff (lock-free SPSC snapshot slot) ───────────────────────
+// The audio callback copies a PCM snapshot into g_dspSnapshot and bumps
+// g_dspWriteSeq (release).  The DSP worker reads g_dspWriteSeq (acquire) and
+// processes the snapshot without blocking the real-time audio thread.
+
+static float                 g_dspSnapshot[FFT_SIZE]{};
+static std::atomic<uint32_t> g_dspWriteSeq{0};
+static std::atomic<uint32_t> g_dspReadSeq{0};
+static std::thread           g_dspThread;
+static std::atomic<bool>     g_dspRunning{false};
 
 // ─── Calibration engine ───────────────────────────────────────────────────────
 
@@ -55,14 +67,12 @@ static CalibrationEngine g_calibEngine;
 
 static void fft_inplace(std::vector<std::complex<float>>& a) {
     const int n = static_cast<int>(a.size());
-    // Bit-reversal permutation
     for (int i = 1, j = 0; i < n; ++i) {
         int bit = n >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
         j ^= bit;
         if (i < j) std::swap(a[i], a[j]);
     }
-    // Butterfly stages
     for (int len = 2; len <= n; len <<= 1) {
         float ang = -2.0f * static_cast<float>(M_PI) / static_cast<float>(len);
         std::complex<float> wlen(std::cos(ang), std::sin(ang));
@@ -82,7 +92,6 @@ static void fft_inplace(std::vector<std::complex<float>>& a) {
 // ─── DSP: find dominant frequency in engine band ──────────────────────────────
 
 static float findDominantHz(const float* pcm, int len) {
-    // Hamming window + complex input
     std::vector<std::complex<float>> buf(len);
     for (int i = 0; i < len; ++i) {
         float w = 0.54f - 0.46f * std::cos(2.0f * static_cast<float>(M_PI) * i / (len - 1));
@@ -90,7 +99,6 @@ static float findDominantHz(const float* pcm, int len) {
     }
     fft_inplace(buf);
 
-    // Find peak magnitude bin in [MIN_ENGINE_HZ, MAX_ENGINE_HZ]
     int binMin = static_cast<int>(MIN_ENGINE_HZ * len / SAMPLE_RATE);
     int binMax = static_cast<int>(MAX_ENGINE_HZ * len / SAMPLE_RATE);
     binMax     = std::min(binMax, len / 2 - 1);
@@ -101,11 +109,48 @@ static float findDominantHz(const float* pcm, int len) {
         float mag = std::abs(buf[b]);
         if (mag > peakMag) { peakMag = mag; peakBin = b; }
     }
-
     return static_cast<float>(peakBin) * SAMPLE_RATE / static_cast<float>(len);
 }
 
-// ─── Audio input callback (microphone → PCM → FFT) ───────────────────────────
+// ─── DSP worker thread ────────────────────────────────────────────────────────
+// Runs all heavy computation (FFT, Welford, K-Means, needle mapping) off the
+// real-time audio thread to prevent buffer underruns and audio glitches.
+
+static void dspWorkerFn() {
+    while (g_dspRunning.load(std::memory_order_relaxed)) {
+        uint32_t w = g_dspWriteSeq.load(std::memory_order_acquire);
+        uint32_t r = g_dspReadSeq.load(std::memory_order_relaxed);
+
+        if (w == r) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        g_dspReadSeq.store(w, std::memory_order_relaxed);
+
+        float hz    = findDominantHz(g_dspSnapshot, FFT_SIZE);
+        float speed = g_gpsSpeed.load();
+        g_dominantHz.store(hz);
+
+        if (speed >= MIN_SPEED_MPS) {
+            float ratio = hz / speed;
+            g_calibEngine.updateWelford(ratio);
+
+            int gear = g_calibEngine.classifyGear(ratio);
+            g_currentGear.store(gear);
+
+            auto ratios = g_calibEngine.getGearRatios();
+            if (gear >= 0) {
+                float lo  = (gear < NUM_GEARS - 1) ? ratios[gear + 1] : ratios[gear] * 0.8f;
+                float hi  = ratios[gear];
+                float pos = (hi - lo) > 1e-6f ? (ratio - lo) / (hi - lo) : 0.5f;
+                g_needlePos.store(std::max(0.0f, std::min(1.0f, pos)));
+            }
+        }
+    }
+}
+
+// ─── Audio input callback (microphone → PCM ring buffer → DSP handoff) ───────
+// This callback is wait-free: no mutex, no allocation, no blocking call.
 
 class InputCallback : public oboe::AudioStreamDataCallback {
 public:
@@ -114,47 +159,22 @@ public:
                                           int32_t numFrames) override {
         auto* samples = static_cast<float*>(audioData);
 
-        // Write into ring buffer
-        {
-            std::lock_guard<std::mutex> lk(g_pcmMutex);
-            for (int i = 0; i < numFrames; ++i) {
-                g_pcmRing[g_pcmHead % FFT_SIZE] = samples[i];
-                g_pcmHead++;
-            }
+        // Single-producer write into ring buffer — no lock needed.
+        for (int i = 0; i < numFrames; ++i) {
+            g_pcmRing[g_pcmHead % FFT_SIZE] = samples[i];
+            ++g_pcmHead;
         }
 
-        // Process once we have a full window
-        if (g_pcmHead >= FFT_SIZE) {
-            float snapshot[FFT_SIZE];
-            {
-                std::lock_guard<std::mutex> lk(g_pcmMutex);
-                // Copy in time order from the ring
-                int start = g_pcmHead % FFT_SIZE;
-                for (int i = 0; i < FFT_SIZE; ++i)
-                    snapshot[i] = g_pcmRing[(start + i) % FFT_SIZE];
-            }
-
-            float hz    = findDominantHz(snapshot, FFT_SIZE);
-            float speed = g_gpsSpeed.load();
-            g_dominantHz.store(hz);
-
-            if (speed >= MIN_SPEED_MPS) {
-                float ratio = hz / speed;
-                g_calibEngine.updateWelford(ratio);
-
-                int gear = g_calibEngine.classifyGear(ratio);
-                g_currentGear.store(gear);
-
-                // Map to needle position using gear-band boundaries
-                auto ratios = g_calibEngine.getGearRatios();
-                if (gear >= 0) {
-                    // Needle: 0 = bottom of gear band, 1 = top of next gear's redline
-                    float lo = (gear < NUM_GEARS - 1) ? ratios[gear + 1] : ratios[gear] * 0.8f;
-                    float hi = ratios[gear];
-                    float pos = (hi - lo) > 1e-6f ? (ratio - lo) / (hi - lo) : 0.5f;
-                    g_needlePos.store(std::max(0.0f, std::min(1.0f, pos)));
-                }
-            }
+        // Hand off a snapshot to the DSP worker only when the previous one has
+        // been consumed (write seq == read seq), preventing snapshot trampling.
+        if (g_pcmHead >= FFT_SIZE &&
+            g_dspWriteSeq.load(std::memory_order_relaxed) ==
+            g_dspReadSeq.load(std::memory_order_relaxed)) {
+            uint32_t start = g_pcmHead % FFT_SIZE;
+            for (int i = 0; i < FFT_SIZE; ++i)
+                g_dspSnapshot[i] = g_pcmRing[(start + i) % FFT_SIZE];
+            // Release ordering ensures snapshot writes are visible before the seq bump.
+            g_dspWriteSeq.fetch_add(1, std::memory_order_release);
         }
 
         return oboe::DataCallbackResult::Continue;
@@ -182,8 +202,7 @@ public:
 
         for (int i = 0; i < numFrames; ++i) {
             if (m_blipRemaining > 0) {
-                // Short attack / decay envelope to avoid clicks
-                float env = 1.0f;
+                float env     = 1.0f;
                 int   attack  = BLIP_SAMPLES / 10;
                 int   release = BLIP_SAMPLES / 10;
                 int   elapsed = BLIP_SAMPLES - m_blipRemaining;
@@ -206,8 +225,8 @@ public:
     }
 
 private:
-    float m_phase          = 0.0f;
-    int   m_blipRemaining  = 0;
+    float m_phase         = 0.0f;
+    int   m_blipRemaining = 0;
 };
 
 // ─── Stream handles ───────────────────────────────────────────────────────────
@@ -217,7 +236,8 @@ static std::shared_ptr<oboe::AudioStream> g_outputStream;
 static InputCallback                      g_inputCallback;
 static OutputCallback                     g_outputCallback;
 
-static void openStreams() {
+// Returns true only if both streams opened and started successfully.
+static bool openStreams() {
     oboe::AudioStreamBuilder inBuilder;
     inBuilder.setDirection(oboe::Direction::Input)
              .setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -228,9 +248,9 @@ static void openStreams() {
              .setDataCallback(&g_inputCallback);
 
     oboe::Result result = inBuilder.openStream(g_inputStream);
-    if (result != oboe::Result::OK) {
+    if (result != oboe::Result::OK || !g_inputStream) {
         LOGE("Failed to open input stream: %s", oboe::convertToText(result));
-        return;
+        return false;
     }
     g_inputStream->requestStart();
 
@@ -244,12 +264,17 @@ static void openStreams() {
               .setDataCallback(&g_outputCallback);
 
     result = outBuilder.openStream(g_outputStream);
-    if (result != oboe::Result::OK) {
+    if (result != oboe::Result::OK || !g_outputStream) {
         LOGE("Failed to open output stream: %s", oboe::convertToText(result));
-        return;
+        // Clean up the already-opened input stream.
+        g_inputStream->stop();
+        g_inputStream->close();
+        g_inputStream.reset();
+        return false;
     }
     g_outputStream->requestStart();
     LOGI("Oboe streams open — sample rate %d Hz", SAMPLE_RATE);
+    return true;
 }
 
 static void closeStreams() {
@@ -259,8 +284,8 @@ static void closeStreams() {
 
 // ─── Sensor thread (LINEAR_ACCELERATION at 100 Hz) ───────────────────────────
 
-static ASensorManager*    g_sensorManager   = nullptr;
-static ASensorEventQueue* g_sensorEventQueue= nullptr;
+static ASensorManager*    g_sensorManager    = nullptr;
+static ASensorEventQueue* g_sensorEventQueue = nullptr;
 static std::thread        g_sensorThread;
 static std::atomic<bool>  g_sensorRunning{false};
 
@@ -296,15 +321,12 @@ static void sensorThreadFn() {
                 float ay = events[i].acceleration.y;
                 float az = events[i].acceleration.z;
                 float magnitude = std::sqrt(ax*ax + ay*ay + az*az);
-
-                // A sharp deceleration spike suggests a gear shift.
                 if (magnitude > SHIFT_ACCEL_THRESH) {
                     g_triggerBlip.store(true);
                 }
             }
         }
-        // Yield briefly to avoid busy-spinning when no events are ready.
-        ALooper_pollOnce(2 /*ms timeout*/, nullptr, nullptr, nullptr);
+        ALooper_pollOnce(2, nullptr, nullptr, nullptr);
     }
 
     ASensorEventQueue_disableSensor(g_sensorEventQueue, accel);
@@ -319,7 +341,13 @@ extern "C" {
 
 JNIEXPORT void JNICALL
 Java_com_app_shiftassistant_NativeEngine_startEngine(JNIEnv*, jclass) {
-    openStreams();
+    if (!openStreams()) {
+        LOGE("Engine startup aborted: audio streams unavailable");
+        return;
+    }
+    g_dspRunning.store(true);
+    g_dspThread = std::thread(dspWorkerFn);
+
     g_sensorRunning.store(true);
     g_sensorThread = std::thread(sensorThreadFn);
     LOGI("Native engine started");
@@ -329,6 +357,10 @@ JNIEXPORT void JNICALL
 Java_com_app_shiftassistant_NativeEngine_stopEngine(JNIEnv*, jclass) {
     g_sensorRunning.store(false);
     if (g_sensorThread.joinable()) g_sensorThread.join();
+
+    g_dspRunning.store(false);
+    if (g_dspThread.joinable()) g_dspThread.join();
+
     closeStreams();
     LOGI("Native engine stopped");
 }
@@ -346,12 +378,10 @@ Java_com_app_shiftassistant_NativeEngine_getVUMeterState(JNIEnv* env, jclass) {
     jfloatArray result = env->NewFloatArray(5);
     if (!result) return nullptr;
 
-    float needle = g_needlePos.load();
-    float hz     = g_dominantHz.load();
-    float speed  = g_gpsSpeed.load();
-    int   gear   = g_currentGear.load();  // 0-based, -1 = unknown
-
-    // Confidence proxy: variance of calibration engine (lower = more confident)
+    float needle     = g_needlePos.load();
+    float hz         = g_dominantHz.load();
+    float speed      = g_gpsSpeed.load();
+    int   gear       = g_currentGear.load();  // 0-based, -1 = unknown
     float variance   = g_calibEngine.getVariance();
     float confidence = (variance > 0.0f) ? 1.0f / (1.0f + variance) : 0.0f;
 
