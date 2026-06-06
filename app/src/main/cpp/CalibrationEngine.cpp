@@ -16,6 +16,14 @@ void CalibrationEngine::updateWelford(float ratio) {
 
     m_ratioSamples.push_back(ratio);
 
+    // Maintain a bounded sliding window so K-Means never iterates over an
+    // unboundedly growing vector. Evict the oldest KMEANS_PRUNE_BATCH entries
+    // in a single erase call (amortised O(1) per sample) when the cap is hit.
+    if (static_cast<int>(m_ratioSamples.size()) > MAX_KMEANS_SAMPLES + KMEANS_PRUNE_BATCH) {
+        m_ratioSamples.erase(m_ratioSamples.begin(),
+                             m_ratioSamples.begin() + KMEANS_PRUNE_BATCH);
+    }
+
     // Use (n - lastRun) so the interval is consistent even after deserialise restores
     // an arbitrary n, which would otherwise cause the plain `n % interval` check to skip.
     if (m_state.n >= MIN_SAMPLES_FOR_KMEANS &&
@@ -71,15 +79,27 @@ void CalibrationEngine::serialise(float* out, int len) const {
 
 void CalibrationEngine::deserialise(const float* in, int len) {
     if (len < 3 + NUM_GEARS) return;
+
+    // Validate all incoming values BEFORE acquiring the lock so that corrupted
+    // or non-finite storage never partially overwrites engine state.
+    const float nFloat = in[0];
+    if (!std::isfinite(nFloat) || nFloat < 0.0f ||
+        !std::isfinite(in[1])  ||
+        !std::isfinite(in[2])  || in[2] < 0.0f) {
+        return;  // malformed Welford state — leave engine untouched
+    }
+    for (int g = 0; g < NUM_GEARS; ++g) {
+        if (!std::isfinite(in[3 + g])) return;  // non-finite ratio — abort
+    }
+
     std::lock_guard<std::mutex> lk(m_mutex);
 
-    m_state.n    = static_cast<int>(in[0]);
+    m_state.n    = static_cast<int>(nFloat);
     m_state.mean = in[1];
     m_state.m2   = in[2];
     for (int g = 0; g < NUM_GEARS; ++g) m_gearRatios[g] = in[3 + g];
 
-    // Validate that at least one gear ratio is non-zero; corrupted storage
-    // (all-zero ratios) would make classifyGear return nonsensical results.
+    // Require at least one non-zero ratio; all-zero means K-Means never ran.
     bool hasValidRatios = false;
     for (int g = 0; g < NUM_GEARS; ++g) {
         if (std::fabs(m_gearRatios[g]) > 1e-6f) { hasValidRatios = true; break; }

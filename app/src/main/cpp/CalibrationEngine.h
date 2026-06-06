@@ -6,9 +6,11 @@
 #include <vector>
 
 static constexpr int NUM_GEARS = 5;
-static constexpr int MIN_SAMPLES_FOR_KMEANS = 20;
-static constexpr int KMEANS_UPDATE_INTERVAL = 10;
-static constexpr int KMEANS_ITERATIONS = 100;
+static constexpr int MIN_SAMPLES_FOR_KMEANS  = 20;
+static constexpr int KMEANS_UPDATE_INTERVAL  = 10;
+static constexpr int KMEANS_ITERATIONS       = 100;
+static constexpr int MAX_KMEANS_SAMPLES      = 4096; // training window cap
+static constexpr int KMEANS_PRUNE_BATCH      = 512;  // entries evicted when cap is exceeded
 
 // Welford Online Algorithm state — persisted across non-contiguous sessions.
 struct WelfordState {

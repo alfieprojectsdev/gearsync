@@ -428,9 +428,9 @@ Java_com_app_shiftassistant_NativeEngine_saveCalibrationState(JNIEnv* env, jclas
     return result;
 }
 
-// Called from Kotlin settings UI to update the blip frequency at runtime.
+// Called via NativeEngine.setAudioCueFrequencyNative — value is pre-clamped by Kotlin wrapper.
 JNIEXPORT void JNICALL
-Java_com_app_shiftassistant_NativeEngine_setAudioCueFrequency(JNIEnv*, jclass, jfloat hz) {
+Java_com_app_shiftassistant_NativeEngine_setAudioCueFrequencyNative(JNIEnv*, jclass, jfloat hz) {
     g_audioCueFrequency.store(hz);
     LOGI("Audio cue frequency set to %.1f Hz", static_cast<float>(hz));
 }

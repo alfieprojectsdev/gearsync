@@ -32,7 +32,15 @@ object NativeEngine {
 
     /**
      * Update the synthesized blip frequency at runtime (thread-safe).
-     * Valid range: 20–22050 Hz. Intended to be wired to a settings UI slider.
+     * Valid range: 20–22050 Hz. Values outside this range are clamped.
+     * Intended to be wired to a settings UI slider.
      */
-    @JvmStatic external fun setAudioCueFrequency(hz: Float)
+    @JvmStatic fun setAudioCueFrequency(hz: Float) {
+        setAudioCueFrequencyNative(hz.coerceIn(MIN_CUE_FREQ_HZ, MAX_CUE_FREQ_HZ))
+    }
+
+    @JvmStatic private external fun setAudioCueFrequencyNative(hz: Float)
+
+    private const val MIN_CUE_FREQ_HZ = 20f
+    private const val MAX_CUE_FREQ_HZ = 22050f
 }
