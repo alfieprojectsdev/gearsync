@@ -1,0 +1,70 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace         'com.app.shiftassistant'
+    compileSdk         34
+
+    defaultConfig {
+        applicationId  'com.app.shiftassistant'
+        minSdk          26
+        targetSdk       34
+        versionCode     1
+        versionName     '1.0'
+
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++17'
+                // Pass STL as shared so Oboe can share it
+                arguments '-DANDROID_STL=c++_shared'
+            }
+        }
+    }
+
+    buildFeatures {
+        // Required to consume Oboe's native AAR via prefab
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path    'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled   true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+dependencies {
+    // Oboe — low-latency Android audio (prefab native AAR + Java API)
+    implementation 'com.google.oboe:oboe:1.9.0'
+
+    // Location services
+    implementation 'com.google.android.gms:play-services-location:21.2.0'
+
+    // UI
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.core:core-ktx:1.13.1'
+}
