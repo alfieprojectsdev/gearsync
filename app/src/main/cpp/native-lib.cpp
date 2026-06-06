@@ -24,7 +24,6 @@
 
 static constexpr int   SAMPLE_RATE        = 48000;
 static constexpr int   FFT_SIZE           = 4096;         // ~85 ms window
-static constexpr float BLIP_FREQ_HZ       = 2000.0f;
 static constexpr int   BLIP_SAMPLES       = SAMPLE_RATE * 50 / 1000; // 50 ms
 static constexpr float BLIP_AMPLITUDE     = 0.45f;
 static constexpr float MIN_ENGINE_HZ      = 20.0f;
@@ -35,11 +34,12 @@ static constexpr int   SENSOR_US          = 10000;  // 100 Hz
 
 // ─── Shared state (atomic where possible) ────────────────────────────────────
 
-static std::atomic<float> g_gpsSpeed{0.0f};       // metres per second from GPS
-static std::atomic<float> g_dominantHz{0.0f};     // last FFT peak
-static std::atomic<float> g_needlePos{0.0f};      // 0.0 (lug) … 1.0 (redline)
-static std::atomic<int>   g_currentGear{-1};      // 0-based gear index, -1 = unknown
-static std::atomic<bool>  g_triggerBlip{false};   // request blip on next output frame
+static std::atomic<float> g_gpsSpeed{0.0f};           // metres per second from GPS
+static std::atomic<float> g_dominantHz{0.0f};         // last FFT peak
+static std::atomic<float> g_needlePos{0.0f};          // 0.0 (lug) … 1.0 (redline)
+static std::atomic<int>   g_currentGear{-1};          // 0-based gear index, -1 = unknown
+static std::atomic<bool>  g_triggerBlip{false};       // request blip on next output frame
+static std::atomic<float> g_audioCueFrequency{14200.0f}; // synthesized blip frequency in Hz
 
 // ─── PCM ring buffer ──────────────────────────────────────────────────────────
 
@@ -174,6 +174,12 @@ public:
             m_blipRemaining = BLIP_SAMPLES;
         }
 
+        // Read frequency once per buffer to keep the hot loop free of atomic loads.
+        // 14200 Hz at 48 kHz (phase inc ≈ 1.857 rad/sample) is well below Nyquist;
+        // the same holds at 44.1 kHz (Nyquist 22050 Hz), so no aliasing can occur.
+        const float phaseInc = 2.0f * static_cast<float>(M_PI) *
+                               g_audioCueFrequency.load() / SAMPLE_RATE;
+
         for (int i = 0; i < numFrames; ++i) {
             if (m_blipRemaining > 0) {
                 // Short attack / decay envelope to avoid clicks
@@ -186,9 +192,8 @@ public:
                 else if (m_blipRemaining < release)
                     env = static_cast<float>(m_blipRemaining) / release;
 
-                out[i] = BLIP_AMPLITUDE * env *
-                         std::sin(m_phase);
-                m_phase += 2.0f * static_cast<float>(M_PI) * BLIP_FREQ_HZ / SAMPLE_RATE;
+                out[i]   = BLIP_AMPLITUDE * env * std::sin(m_phase);
+                m_phase += phaseInc;
                 if (m_phase > 2.0f * static_cast<float>(M_PI))
                     m_phase -= 2.0f * static_cast<float>(M_PI);
                 --m_blipRemaining;
@@ -391,6 +396,13 @@ Java_com_app_shiftassistant_NativeEngine_saveCalibrationState(JNIEnv* env, jclas
     g_calibEngine.serialise(buf, LEN);
     env->SetFloatArrayRegion(result, 0, LEN, buf);
     return result;
+}
+
+// Called from Kotlin settings UI to update the blip frequency at runtime.
+JNIEXPORT void JNICALL
+Java_com_app_shiftassistant_NativeEngine_setAudioCueFrequency(JNIEnv*, jclass, jfloat hz) {
+    g_audioCueFrequency.store(hz);
+    LOGI("Audio cue frequency set to %.1f Hz", static_cast<float>(hz));
 }
 
 } // extern "C"

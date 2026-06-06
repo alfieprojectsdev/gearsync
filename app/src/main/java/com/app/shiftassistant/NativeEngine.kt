@@ -29,4 +29,10 @@ object NativeEngine {
      * Layout: [n_float, mean, m2, ratio0…ratio4]
      */
     @JvmStatic external fun saveCalibrationState(): FloatArray?
+
+    /**
+     * Update the synthesized blip frequency at runtime (thread-safe).
+     * Valid range: 20–22050 Hz. Intended to be wired to a settings UI slider.
+     */
+    @JvmStatic external fun setAudioCueFrequency(hz: Float)
 }
