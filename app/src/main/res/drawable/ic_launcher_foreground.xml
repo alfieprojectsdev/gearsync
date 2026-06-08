@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground: VU-meter gauge (270deg arc) with a needle in the
+     redline/upshift position. White arc + green needle = GearSync brand.
+     Drawn inside the center safe zone (margins ~18dp of the 108 viewport). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Sweeping arc: 270deg, from 135deg (bottom-left) clockwise to 45deg (top-right). -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M40.36,67.64
+                          A26,26 0 1 1 67.64,67.64" />
+
+    <!-- Needle pivot. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,54 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+
+    <!-- Needle pointing toward the redline (upper-right) zone. -->
+    <path
+        android:strokeColor="#27AE60"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M54,54 L70,42" />
+</vector>

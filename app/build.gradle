@@ -6,6 +6,7 @@ plugins {
 android {
     namespace         'dev.alfieprojects.gearsync'
     compileSdk         34
+    ndkVersion         '27.1.12297006'
 
     defaultConfig {
         applicationId  'dev.alfieprojects.gearsync'
