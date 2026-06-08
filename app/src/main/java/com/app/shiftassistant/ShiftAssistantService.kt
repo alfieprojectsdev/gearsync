@@ -32,6 +32,7 @@ class ShiftAssistantService : Service() {
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         createNotificationChannel()
         NativeEngine.startEngine()
+        applyVehicleConfig()
         restoreCalibrationState()
     }
 
@@ -64,6 +65,24 @@ class ShiftAssistantService : Service() {
             locationCallback,
             Looper.getMainLooper()
         )
+    }
+
+    // ─── Vehicle config ───────────────────────────────────────────────────────
+
+    private fun applyVehicleConfig() {
+        try {
+            val cfg = VehicleConfig.load(this)
+            NativeEngine.setVehicleConfig(
+                kSeeds                   = cfg.kSeeds,
+                toleranceLow             = cfg.toleranceLow,
+                toleranceHigh            = cfg.toleranceHigh,
+                stabilityWindowSamples   = cfg.steadyStateWindowSeconds, // GPS = 1 Hz, so seconds == samples
+                speedJitterThresholdMps  = cfg.speedJitterThresholdMps
+            )
+        } catch (e: Exception) {
+            // Config load failure is non-fatal; engine continues unconfigured (open tolerances).
+            android.util.Log.e("ShiftAssistant", "vehicle_config.json load failed: ${e.message}")
+        }
     }
 
     // ─── Calibration state persistence ───────────────────────────────────────

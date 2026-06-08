@@ -1,0 +1,33 @@
+{
+  "_comment": "Toyota Wigo 1.0 E M/T (1KR-FE, 3-cyl 4-stroke). All numeric fields are configurable.",
+
+  "vehicle": "Toyota Wigo 1.0 E M/T",
+
+  "engine": {
+    "cylinders": 3,
+    "strokeCycle": 4
+  },
+
+  "transmission": {
+    "gears": 5,
+    "ratios": [3.545, 1.904, 1.233, 0.906, 0.738],
+    "finalDriveRatio": 4.312
+  },
+
+  "tire": {
+    "spec": "155/80 R13",
+    "nominalCircumferenceMeters": 1.816
+  },
+
+  "calibration": {
+    "_comment_tolerance": "Asymmetric band: captures tire wear (+2.2%), load compression, and pressure drop. Lower bound 2% below theoretical; upper 2.5% above.",
+    "ratioToleranceLow": 0.98,
+    "ratioToleranceHigh": 1.025,
+
+    "_comment_stability": "Number of consecutive 1-Hz GPS samples at stable speed required before feeding a ratio into Welford. 4 s balances lag vs. noise.",
+    "steadyStateWindowSeconds": 4,
+
+    "_comment_jitter": "Speed delta (m/s) below which consecutive GPS readings are considered 'stable'. 0.5 m/s ≈ 1.8 km/h.",
+    "speedJitterThresholdMps": 0.5
+  }
+}

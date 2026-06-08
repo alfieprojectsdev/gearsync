@@ -13,7 +13,8 @@ object NativeEngine {
     @JvmStatic external fun updateGpsSpeed(speed: Float)
 
     /**
-     * Returns [needlePos, dominantHz, speedMps, gear (1-based, 0=unknown), confidence]
+     * Returns [needlePos, dominantHz, speedMps, gear (1-based, 0=unknown),
+     *          confidence, shiftDetected (1.0 = event pending, then cleared)]
      * Called from VUMeterView at 60 FPS.
      */
     @JvmStatic external fun getVUMeterState(): FloatArray?
@@ -31,16 +32,20 @@ object NativeEngine {
     @JvmStatic external fun saveCalibrationState(): FloatArray?
 
     /**
-     * Update the synthesized blip frequency at runtime (thread-safe).
-     * Valid range: 20–22050 Hz. Values outside this range are clamped.
-     * Intended to be wired to a settings UI slider.
+     * Push vehicle-specific calibration parameters to the native engine.
+     * Must be called after [startEngine] and before driving begins.
+     *
+     * @param kSeeds                  Theoretical k_g values (Hz/m·s⁻¹), one per gear, descending.
+     * @param toleranceLow            Fraction below theoretical k_g that is still accepted (e.g. 0.98).
+     * @param toleranceHigh           Fraction above theoretical k_g that is still accepted (e.g. 1.025).
+     * @param stabilityWindowSamples  Consecutive stable GPS samples before feeding Welford.
+     * @param speedJitterThresholdMps Speed delta (m/s) considered "stable" between GPS updates.
      */
-    @JvmStatic fun setAudioCueFrequency(hz: Float) {
-        setAudioCueFrequencyNative(hz.coerceIn(MIN_CUE_FREQ_HZ, MAX_CUE_FREQ_HZ))
-    }
-
-    @JvmStatic private external fun setAudioCueFrequencyNative(hz: Float)
-
-    private const val MIN_CUE_FREQ_HZ = 20f
-    private const val MAX_CUE_FREQ_HZ = 22050f
+    @JvmStatic external fun setVehicleConfig(
+        kSeeds: FloatArray,
+        toleranceLow: Float,
+        toleranceHigh: Float,
+        stabilityWindowSamples: Int,
+        speedJitterThresholdMps: Float
+    )
 }
