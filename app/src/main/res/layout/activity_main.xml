@@ -6,7 +6,7 @@
     android:layout_height="match_parent"
     android:background="@color/background_dark">
 
-    <com.app.shiftassistant.VUMeterView
+    <dev.alfieprojects.gearsync.VUMeterView
         android:id="@+id/vuMeter"
         android:layout_width="0dp"
         android:layout_height="0dp"

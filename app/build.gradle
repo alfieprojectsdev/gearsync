@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace         'com.app.shiftassistant'
+    namespace         'dev.alfieprojects.gearsync'
     compileSdk         34
 
     defaultConfig {
-        applicationId  'com.app.shiftassistant'
+        applicationId  'dev.alfieprojects.gearsync'
         minSdk          26
         targetSdk       34
         versionCode     1

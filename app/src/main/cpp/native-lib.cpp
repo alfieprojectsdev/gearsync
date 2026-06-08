@@ -254,7 +254,7 @@ static std::atomic<bool>  g_sensorRunning{false};
 static void sensorThreadFn() {
     ALooper* looper = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
 
-    g_sensorManager = ASensorManager_getInstanceForPackage("com.app.shiftassistant");
+    g_sensorManager = ASensorManager_getInstanceForPackage("dev.alfieprojects.gearsync");
     if (!g_sensorManager) {
         LOGE("ASensorManager unavailable");
         g_sensorRunning.store(false);  // reflect actual stopped state
@@ -303,7 +303,7 @@ static void sensorThreadFn() {
 extern "C" {
 
 JNIEXPORT void JNICALL
-Java_com_app_shiftassistant_NativeEngine_startEngine(JNIEnv*, jclass) {
+Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv*, jclass) {
     // Reset ring-buffer head so stale samples from a prior session are not fed
     // into the first DSP snapshot after restart.
     g_pcmHead = 0;
@@ -326,7 +326,7 @@ Java_com_app_shiftassistant_NativeEngine_startEngine(JNIEnv*, jclass) {
 }
 
 JNIEXPORT void JNICALL
-Java_com_app_shiftassistant_NativeEngine_stopEngine(JNIEnv*, jclass) {
+Java_dev_alfieprojects_gearsync_NativeEngine_stopEngine(JNIEnv*, jclass) {
     g_sensorRunning.store(false);
     if (g_sensorThread.joinable()) g_sensorThread.join();
 
@@ -340,7 +340,7 @@ Java_com_app_shiftassistant_NativeEngine_stopEngine(JNIEnv*, jclass) {
 // Called from ShiftAssistantService at 1 Hz.
 // Also updates the GPS stability counter used to gate Welford updates.
 JNIEXPORT void JNICALL
-Java_com_app_shiftassistant_NativeEngine_updateGpsSpeed(JNIEnv*, jclass, jfloat speed) {
+Java_dev_alfieprojects_gearsync_NativeEngine_updateGpsSpeed(JNIEnv*, jclass, jfloat speed) {
     float prev         = g_prevGpsSpeed.load(std::memory_order_relaxed);
     float jitterThresh = g_speedJitterThreshold.load(std::memory_order_relaxed);
 
@@ -362,7 +362,7 @@ Java_com_app_shiftassistant_NativeEngine_updateGpsSpeed(JNIEnv*, jclass, jfloat 
 //                    confidence, shiftDetected (1.0 = shift event pending)]
 // shiftDetected is cleared (consumed) on each read so the flash is one-shot.
 JNIEXPORT jfloatArray JNICALL
-Java_com_app_shiftassistant_NativeEngine_getVUMeterState(JNIEnv* env, jclass) {
+Java_dev_alfieprojects_gearsync_NativeEngine_getVUMeterState(JNIEnv* env, jclass) {
     jfloatArray result = env->NewFloatArray(6);
     if (!result) return nullptr;
 
@@ -390,7 +390,7 @@ Java_com_app_shiftassistant_NativeEngine_getVUMeterState(JNIEnv* env, jclass) {
 // Restore Welford + gear-ratio state from a previous session.
 // stateArray layout: [n_float, mean, m2, ratio0, ratio1, ratio2, ratio3, ratio4]
 JNIEXPORT void JNICALL
-Java_com_app_shiftassistant_NativeEngine_resumeCalibrationState(JNIEnv* env,
+Java_dev_alfieprojects_gearsync_NativeEngine_resumeCalibrationState(JNIEnv* env,
                                                                  jclass,
                                                                  jfloatArray stateArray) {
     if (!stateArray) return;
@@ -408,7 +408,7 @@ Java_com_app_shiftassistant_NativeEngine_resumeCalibrationState(JNIEnv* env,
 
 // Serialise current calibration state for SharedPreferences persistence.
 JNIEXPORT jfloatArray JNICALL
-Java_com_app_shiftassistant_NativeEngine_saveCalibrationState(JNIEnv* env, jclass) {
+Java_dev_alfieprojects_gearsync_NativeEngine_saveCalibrationState(JNIEnv* env, jclass) {
     constexpr int LEN = 3 + NUM_GEARS;
     jfloatArray result = env->NewFloatArray(LEN);
     if (!result) return nullptr;
@@ -423,7 +423,7 @@ Java_com_app_shiftassistant_NativeEngine_saveCalibrationState(JNIEnv* env, jclas
 // from vehicle_config.json.  Seeds the calibration engine and configures the
 // GPS stability window and tolerance band used by classifyGear.
 JNIEXPORT void JNICALL
-Java_com_app_shiftassistant_NativeEngine_setVehicleConfig(JNIEnv*     env,
+Java_dev_alfieprojects_gearsync_NativeEngine_setVehicleConfig(JNIEnv*     env,
                                                            jclass,
                                                            jfloatArray kSeedsArr,
                                                            jfloat      toleranceLow,

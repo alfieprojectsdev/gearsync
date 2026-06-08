@@ -1,4 +1,4 @@
-package com.app.shiftassistant
+package dev.alfieprojects.gearsync
 
 import android.app.Notification
 import android.app.NotificationChannel
