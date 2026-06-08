@@ -25,13 +25,11 @@
 
 static constexpr int   SAMPLE_RATE        = 48000;
 static constexpr int   FFT_SIZE           = 4096;         // ~85 ms window
-static constexpr int   BLIP_SAMPLES       = SAMPLE_RATE * 50 / 1000; // 50 ms
-static constexpr float BLIP_AMPLITUDE     = 0.45f;
 static constexpr float MIN_ENGINE_HZ      = 20.0f;
 static constexpr float MAX_ENGINE_HZ      = 250.0f;
-static constexpr float MIN_SPEED_MPS      = 1.0f;   // ignore GPS jitter below 1 m/s
-static constexpr float SHIFT_ACCEL_THRESH = 4.0f;   // m/s² spike → trigger blip
-static constexpr int   SENSOR_US          = 10000;  // 100 Hz
+static constexpr float MIN_SPEED_MPS      = 1.0f;         // ignore GPS jitter below 1 m/s
+static constexpr float SHIFT_ACCEL_THRESH = 4.0f;         // m/s² spike → visual shift flash
+static constexpr int   SENSOR_US          = 10000;        // 100 Hz
 
 // ─── Shared state (atomic where possible) ────────────────────────────────────
 
@@ -39,8 +37,19 @@ static std::atomic<float>    g_gpsSpeed{0.0f};            // metres per second f
 static std::atomic<float>    g_dominantHz{0.0f};          // last FFT peak
 static std::atomic<float>    g_needlePos{0.0f};           // 0.0 (lug) … 1.0 (redline)
 static std::atomic<int>      g_currentGear{-1};           // 0-based gear index, -1 = unknown
-static std::atomic<bool>     g_triggerBlip{false};        // request blip on next output frame
-static std::atomic<float>    g_audioCueFrequency{14200.0f}; // synthesized blip frequency in Hz
+static std::atomic<bool>     g_shiftDetected{false};      // set by sensor thread; consumed by VU meter
+
+// ─── Vehicle config (set once via setVehicleConfig JNI, then read-only) ──────
+
+static std::atomic<float>    g_toleranceLow{0.0f};            // 0 = open (no rejection)
+static std::atomic<float>    g_toleranceHigh{0.0f};
+static std::atomic<int>      g_stabilityWindowSamples{0};     // 0 = no window required
+static std::atomic<float>    g_speedJitterThreshold{0.5f};    // m/s
+
+// ─── GPS speed stability tracking (updated in updateGpsSpeed at 1 Hz) ────────
+
+static std::atomic<float>    g_prevGpsSpeed{-1.0f};           // -1 sentinel = first update
+static std::atomic<int>      g_speedStableCount{0};
 
 // ─── PCM ring buffer ──────────────────────────────────────────────────────────
 // Written exclusively by the audio input callback — no mutex required.
@@ -50,8 +59,10 @@ static uint32_t  g_pcmHead = 0;   // uint32_t: wraps at 2^32, well-defined, ~25 
 
 // ─── DSP worker handoff (lock-free SPSC snapshot slot) ───────────────────────
 // The audio callback copies a PCM snapshot into g_dspSnapshot and bumps
-// g_dspWriteSeq (release).  The DSP worker reads g_dspWriteSeq (acquire) and
-// processes the snapshot without blocking the real-time audio thread.
+// g_dspWriteSeq (release).  The DSP worker copies the snapshot into a local
+// buffer and THEN releases the slot (g_dspReadSeq) BEFORE processing,
+// so the input callback can safely overwrite g_dspSnapshot only after the
+// local copy is complete.
 
 static float                 g_dspSnapshot[FFT_SIZE]{};
 static std::atomic<uint32_t> g_dspWriteSeq{0};
@@ -117,6 +128,9 @@ static float findDominantHz(const float* pcm, int len) {
 // real-time audio thread to prevent buffer underruns and audio glitches.
 
 static void dspWorkerFn() {
+    // Thread-local copy of the snapshot — avoids any overlap with the input callback.
+    float localSnapshot[FFT_SIZE];
+
     while (g_dspRunning.load(std::memory_order_relaxed)) {
         uint32_t w = g_dspWriteSeq.load(std::memory_order_acquire);
         uint32_t r = g_dspReadSeq.load(std::memory_order_relaxed);
@@ -125,25 +139,38 @@ static void dspWorkerFn() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
-        g_dspReadSeq.store(w, std::memory_order_relaxed);
 
-        float hz    = findDominantHz(g_dspSnapshot, FFT_SIZE);
+        // Copy the shared snapshot to local storage BEFORE releasing the slot.
+        // Releasing readSeq first would allow the input callback to overwrite
+        // g_dspSnapshot while we are still copying from it.
+        std::memcpy(localSnapshot, g_dspSnapshot, sizeof(localSnapshot));
+        g_dspReadSeq.store(w, std::memory_order_relaxed);  // slot is now free for next snapshot
+
+        float hz    = findDominantHz(localSnapshot, FFT_SIZE);
         float speed = g_gpsSpeed.load();
         g_dominantHz.store(hz);
 
         if (speed >= MIN_SPEED_MPS) {
-            float ratio = hz / speed;
-            g_calibEngine.updateWelford(ratio);
+            float ratio     = hz / speed;
+            int   stableReq = g_stabilityWindowSamples.load(std::memory_order_relaxed);
+            int   stable    = g_speedStableCount.load(std::memory_order_relaxed);
+
+            // Only feed Welford when GPS speed has been stable for the configured window.
+            if (stableReq == 0 || stable >= stableReq) {
+                g_calibEngine.updateWelford(ratio);
+            }
 
             int gear = g_calibEngine.classifyGear(ratio);
             g_currentGear.store(gear);
 
-            auto ratios = g_calibEngine.getGearRatios();
             if (gear >= 0) {
-                float lo  = (gear < NUM_GEARS - 1) ? ratios[gear + 1] : ratios[gear] * 0.8f;
-                float hi  = ratios[gear];
-                float pos = (hi - lo) > 1e-6f ? (ratio - lo) / (hi - lo) : 0.5f;
+                auto  ratios = g_calibEngine.getGearRatios();
+                float lo     = (gear < NUM_GEARS - 1) ? ratios[gear + 1] : ratios[gear] * 0.8f;
+                float hi     = ratios[gear];
+                float pos    = (hi - lo) > 1e-6f ? (ratio - lo) / (hi - lo) : 0.5f;
                 g_needlePos.store(std::max(0.0f, std::min(1.0f, pos)));
+            } else {
+                g_needlePos.store(0.0f);  // reset to lug end when gear is unknown
             }
         }
     }
@@ -181,62 +208,12 @@ public:
     }
 };
 
-// ─── Audio output callback (sine blip synthesis) ──────────────────────────────
-
-class OutputCallback : public oboe::AudioStreamDataCallback {
-public:
-    oboe::DataCallbackResult onAudioReady(oboe::AudioStream* /*stream*/,
-                                          void* audioData,
-                                          int32_t numFrames) override {
-        auto* out = static_cast<float*>(audioData);
-
-        if (g_triggerBlip.exchange(false)) {
-            m_blipRemaining = BLIP_SAMPLES;
-        }
-
-        // Read frequency once per buffer to keep the hot loop free of atomic loads.
-        // 14200 Hz at 48 kHz (phase inc ≈ 1.857 rad/sample) is well below Nyquist;
-        // the same holds at 44.1 kHz (Nyquist 22050 Hz), so no aliasing can occur.
-        const float phaseInc = 2.0f * static_cast<float>(M_PI) *
-                               g_audioCueFrequency.load() / SAMPLE_RATE;
-
-        for (int i = 0; i < numFrames; ++i) {
-            if (m_blipRemaining > 0) {
-                float env     = 1.0f;
-                int   attack  = BLIP_SAMPLES / 10;
-                int   release = BLIP_SAMPLES / 10;
-                int   elapsed = BLIP_SAMPLES - m_blipRemaining;
-                if (elapsed < attack)
-                    env = static_cast<float>(elapsed) / attack;
-                else if (m_blipRemaining < release)
-                    env = static_cast<float>(m_blipRemaining) / release;
-
-                out[i]   = BLIP_AMPLITUDE * env * std::sin(m_phase);
-                m_phase += phaseInc;
-                if (m_phase > 2.0f * static_cast<float>(M_PI))
-                    m_phase -= 2.0f * static_cast<float>(M_PI);
-                --m_blipRemaining;
-            } else {
-                out[i]  = 0.0f;
-                m_phase = 0.0f;
-            }
-        }
-        return oboe::DataCallbackResult::Continue;
-    }
-
-private:
-    float m_phase         = 0.0f;
-    int   m_blipRemaining = 0;
-};
-
-// ─── Stream handles ───────────────────────────────────────────────────────────
+// ─── Stream handle (input only — no audio output stream) ─────────────────────
 
 static std::shared_ptr<oboe::AudioStream> g_inputStream;
-static std::shared_ptr<oboe::AudioStream> g_outputStream;
 static InputCallback                      g_inputCallback;
-static OutputCallback                     g_outputCallback;
 
-// Returns true only if both streams opened and started successfully.
+// Returns true only if the input stream opened and started successfully.
 static bool openStreams() {
     oboe::AudioStreamBuilder inBuilder;
     inBuilder.setDirection(oboe::Direction::Input)
@@ -253,36 +230,21 @@ static bool openStreams() {
         return false;
     }
     g_inputStream->requestStart();
-
-    oboe::AudioStreamBuilder outBuilder;
-    outBuilder.setDirection(oboe::Direction::Output)
-              .setPerformanceMode(oboe::PerformanceMode::LowLatency)
-              .setSharingMode(oboe::SharingMode::Exclusive)
-              .setFormat(oboe::AudioFormat::Float)
-              .setChannelCount(1)
-              .setSampleRate(SAMPLE_RATE)
-              .setDataCallback(&g_outputCallback);
-
-    result = outBuilder.openStream(g_outputStream);
-    if (result != oboe::Result::OK || !g_outputStream) {
-        LOGE("Failed to open output stream: %s", oboe::convertToText(result));
-        // Clean up the already-opened input stream.
-        g_inputStream->stop();
-        g_inputStream->close();
-        g_inputStream.reset();
-        return false;
-    }
-    g_outputStream->requestStart();
-    LOGI("Oboe streams open — sample rate %d Hz", SAMPLE_RATE);
+    LOGI("Oboe input stream open — sample rate %d Hz", SAMPLE_RATE);
     return true;
 }
 
 static void closeStreams() {
-    if (g_inputStream)  { g_inputStream->stop();  g_inputStream->close();  g_inputStream.reset(); }
-    if (g_outputStream) { g_outputStream->stop(); g_outputStream->close(); g_outputStream.reset(); }
+    if (g_inputStream) {
+        g_inputStream->stop();
+        g_inputStream->close();
+        g_inputStream.reset();
+    }
 }
 
 // ─── Sensor thread (LINEAR_ACCELERATION at 100 Hz) ───────────────────────────
+// Detects shift events (acceleration spike) and sets g_shiftDetected for the
+// VU meter to display a visual flash — no audio output involved.
 
 static ASensorManager*    g_sensorManager    = nullptr;
 static ASensorEventQueue* g_sensorEventQueue = nullptr;
@@ -295,6 +257,7 @@ static void sensorThreadFn() {
     g_sensorManager = ASensorManager_getInstanceForPackage("com.app.shiftassistant");
     if (!g_sensorManager) {
         LOGE("ASensorManager unavailable");
+        g_sensorRunning.store(false);  // reflect actual stopped state
         return;
     }
 
@@ -302,6 +265,7 @@ static void sensorThreadFn() {
             g_sensorManager, ASENSOR_TYPE_LINEAR_ACCELERATION);
     if (!accel) {
         LOGE("LINEAR_ACCELERATION sensor unavailable");
+        g_sensorRunning.store(false);  // reflect actual stopped state
         return;
     }
 
@@ -320,9 +284,8 @@ static void sensorThreadFn() {
                 float ax = events[i].acceleration.x;
                 float ay = events[i].acceleration.y;
                 float az = events[i].acceleration.z;
-                float magnitude = std::sqrt(ax*ax + ay*ay + az*az);
-                if (magnitude > SHIFT_ACCEL_THRESH) {
-                    g_triggerBlip.store(true);
+                if (std::sqrt(ax*ax + ay*ay + az*az) > SHIFT_ACCEL_THRESH) {
+                    g_shiftDetected.store(true);
                 }
             }
         }
@@ -341,8 +304,17 @@ extern "C" {
 
 JNIEXPORT void JNICALL
 Java_com_app_shiftassistant_NativeEngine_startEngine(JNIEnv*, jclass) {
+    // Reset ring-buffer head so stale samples from a prior session are not fed
+    // into the first DSP snapshot after restart.
+    g_pcmHead = 0;
+    std::memset(g_pcmRing, 0, sizeof(g_pcmRing));
+
+    // Reset GPS stability counters so the stability window starts fresh.
+    g_prevGpsSpeed.store(-1.0f);
+    g_speedStableCount.store(0);
+
     if (!openStreams()) {
-        LOGE("Engine startup aborted: audio streams unavailable");
+        LOGE("Engine startup aborted: audio input stream unavailable");
         return;
     }
     g_dspRunning.store(true);
@@ -366,33 +338,52 @@ Java_com_app_shiftassistant_NativeEngine_stopEngine(JNIEnv*, jclass) {
 }
 
 // Called from ShiftAssistantService at 1 Hz.
+// Also updates the GPS stability counter used to gate Welford updates.
 JNIEXPORT void JNICALL
 Java_com_app_shiftassistant_NativeEngine_updateGpsSpeed(JNIEnv*, jclass, jfloat speed) {
+    float prev         = g_prevGpsSpeed.load(std::memory_order_relaxed);
+    float jitterThresh = g_speedJitterThreshold.load(std::memory_order_relaxed);
+
+    if (prev < 0.0f) {
+        // First update after start — initialise without incrementing stable count.
+        g_speedStableCount.store(0, std::memory_order_relaxed);
+    } else if (std::fabs(speed - prev) <= jitterThresh) {
+        g_speedStableCount.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        // Speed changed beyond jitter threshold — reset stability window.
+        g_speedStableCount.store(0, std::memory_order_relaxed);
+    }
+    g_prevGpsSpeed.store(speed, std::memory_order_relaxed);
     g_gpsSpeed.store(speed);
 }
 
 // Called from VUMeterView at 60 FPS.
-// Returns float[5]: [needlePos, dominantHz, speed, gear+1 (1-based), confidence]
+// Returns float[6]: [needlePos, dominantHz, speedMps, gear+1 (1-based, 0=unknown),
+//                    confidence, shiftDetected (1.0 = shift event pending)]
+// shiftDetected is cleared (consumed) on each read so the flash is one-shot.
 JNIEXPORT jfloatArray JNICALL
 Java_com_app_shiftassistant_NativeEngine_getVUMeterState(JNIEnv* env, jclass) {
-    jfloatArray result = env->NewFloatArray(5);
+    jfloatArray result = env->NewFloatArray(6);
     if (!result) return nullptr;
 
-    float needle     = g_needlePos.load();
-    float hz         = g_dominantHz.load();
-    float speed      = g_gpsSpeed.load();
-    int   gear       = g_currentGear.load();  // 0-based, -1 = unknown
-    float variance   = g_calibEngine.getVariance();
-    float confidence = (variance > 0.0f) ? 1.0f / (1.0f + variance) : 0.0f;
+    float needle   = g_needlePos.load();
+    float hz       = g_dominantHz.load();
+    float speed    = g_gpsSpeed.load();
+    int   gear     = g_currentGear.load();  // 0-based, -1 = unknown
+    float variance = g_calibEngine.getVariance();
+    float conf     = (variance > 0.0f) ? 1.0f / (1.0f + variance) : 0.0f;
+    // exchange clears the flag atomically so the VU meter flash fires exactly once per event.
+    float shift    = g_shiftDetected.exchange(false) ? 1.0f : 0.0f;
 
-    float buf[5] = {
+    float buf[6] = {
         needle,
         hz,
         speed,
-        static_cast<float>(gear + 1),   // 1-based for Kotlin display (0 = unknown)
-        confidence
+        static_cast<float>(gear + 1),  // 1-based; 0 = unknown
+        conf,
+        shift
     };
-    env->SetFloatArrayRegion(result, 0, 5, buf);
+    env->SetFloatArrayRegion(result, 0, 6, buf);
     return result;
 }
 
@@ -428,11 +419,36 @@ Java_com_app_shiftassistant_NativeEngine_saveCalibrationState(JNIEnv* env, jclas
     return result;
 }
 
-// Called via NativeEngine.setAudioCueFrequencyNative — value is pre-clamped by Kotlin wrapper.
+// Called from ShiftAssistantService after startEngine, with parameters derived
+// from vehicle_config.json.  Seeds the calibration engine and configures the
+// GPS stability window and tolerance band used by classifyGear.
 JNIEXPORT void JNICALL
-Java_com_app_shiftassistant_NativeEngine_setAudioCueFrequencyNative(JNIEnv*, jclass, jfloat hz) {
-    g_audioCueFrequency.store(hz);
-    LOGI("Audio cue frequency set to %.1f Hz", static_cast<float>(hz));
+Java_com_app_shiftassistant_NativeEngine_setVehicleConfig(JNIEnv*     env,
+                                                           jclass,
+                                                           jfloatArray kSeedsArr,
+                                                           jfloat      toleranceLow,
+                                                           jfloat      toleranceHigh,
+                                                           jint        stabilityWindowSamples,
+                                                           jfloat      speedJitterThresholdMps) {
+    if (!kSeedsArr) return;
+    jsize len = env->GetArrayLength(kSeedsArr);
+    if (len < NUM_GEARS) return;
+
+    jfloat* seeds = env->GetFloatArrayElements(kSeedsArr, nullptr);
+    if (!seeds) return;
+
+    g_calibEngine.seedCentroids(seeds, static_cast<int>(len), toleranceLow, toleranceHigh);
+    env->ReleaseFloatArrayElements(kSeedsArr, seeds, JNI_ABORT);
+
+    g_toleranceLow.store(toleranceLow);
+    g_toleranceHigh.store(toleranceHigh);
+    g_stabilityWindowSamples.store(stabilityWindowSamples);
+    g_speedJitterThreshold.store(speedJitterThresholdMps);
+
+    LOGI("Vehicle config applied — tol=[%.3f, %.3f] stableWin=%d jitter=%.2f m/s",
+         static_cast<float>(toleranceLow), static_cast<float>(toleranceHigh),
+         static_cast<int>(stabilityWindowSamples),
+         static_cast<float>(speedJitterThresholdMps));
 }
 
 } // extern "C"

@@ -49,16 +49,32 @@ int CalibrationEngine::getSampleCount() const {
     return m_state.n;
 }
 
+void CalibrationEngine::seedCentroids(const float* seeds, int n, float tolLow, float tolHigh) {
+    if (n < NUM_GEARS || !seeds) return;
+    std::lock_guard<std::mutex> lk(m_mutex);
+    for (int g = 0; g < NUM_GEARS; ++g) m_gearRatios[g] = seeds[g];
+    m_tolLow     = tolLow;
+    m_tolHigh    = tolHigh;
+    m_calibrated = true;
+}
+
 int CalibrationEngine::classifyGear(float ratio) const {
     std::lock_guard<std::mutex> lk(m_mutex);
     if (!m_calibrated) return -1;
 
-    int   best     = 0;
+    int   best     = -1;
     float bestDist = FLT_MAX;
     for (int g = 0; g < NUM_GEARS; ++g) {
         float d = std::fabs(ratio - m_gearRatios[g]);
         if (d < bestDist) { bestDist = d; best = g; }
     }
+
+    // When tolerance is configured, reject ratios outside [centroid*tolLow, centroid*tolHigh].
+    if (best >= 0 && m_tolLow > 0.0f && m_tolHigh > 0.0f) {
+        float c = m_gearRatios[best];
+        if (ratio < c * m_tolLow || ratio > c * m_tolHigh) return -1;
+    }
+
     return best;
 }
 
@@ -120,6 +136,8 @@ void CalibrationEngine::reset() {
     m_ratioSamples.clear();
     m_calibrated        = false;
     m_lastKMeansSample  = 0;
+    m_tolLow            = 0.0f;
+    m_tolHigh           = 0.0f;
 }
 
 void CalibrationEngine::runKMeans() {

@@ -34,7 +34,14 @@ public:
     // Run 1-D K-Means over all stored ratio samples and lock in gear centroids.
     void runKMeans();
 
-    // Given the current ratio, return the best-matching gear index (0-based, -1 = unknown).
+    // Seed initial centroids from vehicle config (theoretical k_g values, descending).
+    // Also sets the asymmetric tolerance band used by classifyGear.
+    // K-Means will refine these centroids as real observations accumulate.
+    void seedCentroids(const float* seeds, int n, float tolLow, float tolHigh);
+
+    // Given the current ratio, return the best-matching gear index (0-based).
+    // Returns -1 when uncalibrated/unseeded, or when the ratio falls outside the
+    // configured tolerance band [centroid * tolLow, centroid * tolHigh] for every gear.
     int classifyGear(float ratio) const;
 
     // Gear ratios sorted descending (gear 1 = highest ratio).
@@ -59,4 +66,9 @@ private:
     bool                            m_calibrated        = false;
     int                             m_lastKMeansSample  = 0;   // n at last K-Means run
     std::mt19937                    m_rng{std::random_device{}()};
+
+    // Asymmetric tolerance band set by seedCentroids (0 = open/unconfigured).
+    // classifyGear accepts ratio r for centroid c when c*tolLow <= r <= c*tolHigh.
+    float                           m_tolLow  = 0.0f;
+    float                           m_tolHigh = 0.0f;
 };
