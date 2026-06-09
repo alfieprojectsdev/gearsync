@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 void CalibrationEngine::updateWelford(float ratio) {
@@ -298,6 +299,8 @@ void CalibrationEngine::deserialise(const float* in, int len) {
     // or non-finite storage never partially overwrites engine state. (ref: C-003)
     const float nFloat = in[0];
     if (!std::isfinite(nFloat) || nFloat < 0.0f ||
+        nFloat > static_cast<float>(std::numeric_limits<int>::max()) ||
+        std::floor(nFloat) != nFloat ||   // must be an exact, in-range integer (no UB on cast)
         !std::isfinite(in[1])  ||
         !std::isfinite(in[2])  || in[2] < 0.0f) {
         return;  // malformed Welford state — leave engine untouched
@@ -369,22 +372,35 @@ void CalibrationEngine::runKMeansInternal(std::vector<float>& samples) {
     if (n < NUM_GEARS) return;
 
     float centroids[NUM_GEARS] = {};
+    bool  placed[NUM_GEARS]    = {};
 
-    // Pick first centroid uniformly at random using the engine-local mt19937.
+    // Pin-aware farthest-first init. Pinned slots are fixed anchors at their locked
+    // ratio and seed no new cluster; unpinned slots are then seeded farthest from ALL
+    // already-placed centroids (pinned + unpinned) so an unpinned centroid never lands
+    // on the pinned cluster and steal/duplicate it. (ref: review R-pin2)
+    bool anyPlaced = false;
+    for (int k = 0; k < NUM_GEARS; ++k) {
+        if (m_pinned[k]) { centroids[k] = m_gearRatios[k]; placed[k] = true; anyPlaced = true; }
+    }
+
     std::uniform_int_distribution<std::size_t> dist(0, samples.size() - 1);
-    centroids[0] = samples[dist(m_rng)];
-
-    // Each subsequent centroid is the sample farthest from all existing ones.
-    for (int k = 1; k < NUM_GEARS; ++k) {
-        float maxDist = -1.0f;
-        for (float s : samples) {
-            float minDist = FLT_MAX;
-            for (int j = 0; j < k; ++j) {
-                float d = std::fabs(s - centroids[j]);
-                if (d < minDist) minDist = d;
+    for (int k = 0; k < NUM_GEARS; ++k) {
+        if (placed[k]) continue;
+        if (!anyPlaced) {
+            centroids[k] = samples[dist(m_rng)];  // first seed when there are no pins
+        } else {
+            float maxDist = -1.0f;
+            for (float s : samples) {
+                float minDist = FLT_MAX;
+                for (int j = 0; j < NUM_GEARS; ++j) {
+                    if (!placed[j]) continue;
+                    minDist = std::min(minDist, std::fabs(s - centroids[j]));
+                }
+                if (minDist > maxDist) { maxDist = minDist; centroids[k] = s; }
             }
-            if (minDist > maxDist) { maxDist = minDist; centroids[k] = s; }
         }
+        placed[k]  = true;
+        anyPlaced  = true;
     }
 
     // Lloyd's iterations.
@@ -393,17 +409,23 @@ void CalibrationEngine::runKMeansInternal(std::vector<float>& samples) {
         int   counts[NUM_GEARS] = {};
 
         for (float s : samples) {
-            int   best     = 0;
+            int   best     = -1;
             float bestDist = FLT_MAX;
             for (int k = 0; k < NUM_GEARS; ++k) {
-                // Skip pinned gears: their centroids were set by guided RANSAC fit
-                // and must not be moved by passive samples. (ref: DL-002, DL-005)
-                if (m_pinned[k]) continue;
-                float d = std::fabs(s - centroids[k]);
+                // Pinned gears DO participate in assignment (using their fixed locked
+                // ratio as the anchor) so samples near a locked gear are absorbed by it
+                // instead of pulling neighbouring unpinned centroids. They are simply
+                // never updated below. (ref: DL-002, DL-005, review R-pin2)
+                const float anchor = m_pinned[k] ? m_gearRatios[k] : centroids[k];
+                const float d = std::fabs(s - anchor);
                 if (d < bestDist) { bestDist = d; best = k; }
             }
-            sums[best]   += s;
-            counts[best] += 1;
+            // Only accumulate for unpinned winners; samples claimed by a pinned gear
+            // contribute to nothing, leaving that centroid fixed.
+            if (best >= 0 && !m_pinned[best]) {
+                sums[best]   += s;
+                counts[best] += 1;
+            }
         }
 
         bool converged = true;

@@ -186,18 +186,25 @@ static void test_pin_survives_kmeans() {
     float pinnedBefore = eng.getGearRatios()[2];
     assert(std::fabs(pinnedBefore - kPinned) < 0.5f);
 
-    // Feed many passive ratios scattered around the OTHER gears and run K-Means.
+    // Feed passive ratios around the OTHER gears AND a heavy cluster AT the pinned
+    // ratio (~11). With the assignment fix those pinned-ratio samples are absorbed by
+    // the pinned gear and must NOT drag the unpinned neighbours (gear1≈15, gear3≈8).
     std::uniform_real_distribution<float> noise(-0.3f, 0.3f);
     float others[4] = {20.0f, 15.0f, 8.0f, 6.0f};
     for (int i = 0; i < 400; ++i) eng.updateWelford(others[i % 4] + noise(rng));
+    for (int i = 0; i < 200; ++i) eng.updateWelford(kPinned + noise(rng));  // near pinned gear
     eng.runKMeans();
 
     auto r = eng.getGearRatios();
     // Pinned gear index 2 is unchanged (not migrated, not nudged).
     assert(std::fabs(r[2] - pinnedBefore) < 1e-3f);
+    // Unpinned neighbours stay near their true clusters — NOT pulled toward pinned 11.
+    assert(std::fabs(r[1] - 15.0f) < 1.5f);
+    assert(std::fabs(r[3] - 8.0f)  < 1.5f);
     // Strict descending order preserved.
     for (int g = 1; g < 5; ++g) assert(r[g] < r[g - 1]);
-    std::printf("PASS test_pin_survives_kmeans: pinned[2]=%.4f order ok\n", r[2]);
+    std::printf("PASS test_pin_survives_kmeans: pinned[2]=%.4f r[1]=%.2f r[3]=%.2f order ok\n",
+                r[2], r[1], r[3]);
 }
 
 int main() {
