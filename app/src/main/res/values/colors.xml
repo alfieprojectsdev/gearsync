@@ -3,4 +3,14 @@
     <color name="background_dark">#0D0D1A</color>
     <color name="button_start">#27AE60</color>
     <color name="button_stop">#E74C3C</color>
+
+    <!-- VU meter segment states -->
+    <color name="vu_lug_segment">#00D4FF</color>
+    <color name="vu_opt_segment">#00E676</color>
+    <color name="vu_shift_segment">#FF1744</color>
+    <color name="vu_inactive_segment">#2A2A2A</color>
+
+    <!-- VU meter ambient warning wash -->
+    <color name="vu_ambient_lug_base">#0022FF</color>
+    <color name="vu_ambient_shift_base">#FF0000</color>
 </resources>
