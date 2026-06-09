@@ -45,6 +45,11 @@ static constexpr int   RANSAC_N_MIN       = 20;     // min inliers to accept a f
 static constexpr float RANSAC_EPS_FRACTION = 0.03f; // inlier band width: 3 % of f
 static constexpr float RANSAC_INLIER_FRAC = 0.6f;   // min inlier fraction to lock
 static constexpr float RANSAC_DELTA_V_MIN = 2.0f;   // m/s speed spread required for lock
+// Bound the capture so a stalled session cannot grow m_capture unboundedly, and
+// throttle the O(K·n) RANSAC refit so it runs at most every REFIT_INTERVAL samples.
+static constexpr int   RANSAC_MAX_CAPTURE   = 512;  // sliding-window cap on capture size
+static constexpr int   RANSAC_CAPTURE_PRUNE = 128;  // oldest entries evicted per batch
+static constexpr int   RANSAC_REFIT_INTERVAL = 5;   // attempt a fit every Nth gated sample
 
 class CalibrationEngine {
 public:
@@ -141,7 +146,8 @@ private:
 
     // Guided calibration state.
     GearCapture                     m_capture;
-    int                             m_calibGear = -1;  // -1 = IDLE
+    int                             m_calibGear      = -1;  // -1 = IDLE
+    int                             m_captureSamples = 0;   // gated samples fed since begin (refit throttle)
 
     // Pin flags: pinned gears are skipped in K-Means reassignment. (ref: DL-002)
     std::array<bool, NUM_GEARS>     m_pinned = {};

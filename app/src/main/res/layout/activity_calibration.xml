@@ -15,7 +15,7 @@
         android:id="@+id/tvCalibStatus"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:textColor="#FFFFFF"
+        android:textColor="@color/calib_text_primary"
         android:textSize="18sp"
         android:gravity="center"
         android:padding="16dp"

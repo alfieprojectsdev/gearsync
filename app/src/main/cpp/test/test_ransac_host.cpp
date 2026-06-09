@@ -165,6 +165,41 @@ static void test_serialise_roundtrip() {
     std::printf("PASS test_serialise_roundtrip\n");
 }
 
+// A guided lock pins a gear by INDEX: passive K-Means must leave that ratio and
+// its public index untouched, and the array must stay strictly descending. (review R-pin)
+static void test_pin_survives_kmeans() {
+    CalibrationEngineTestable eng;
+    float seeds[5] = {20.0f, 15.0f, 11.0f, 8.0f, 6.0f};
+    eng.seedCentroids(seeds, 5, 0.98f, 1.025f);
+
+    // Lock gear index 2 at ~11.0 via guided capture.
+    eng.beginGearCalibration(2);
+    const float kPinned = 11.0f;
+    std::mt19937 rng(123);
+    std::uniform_real_distribution<float> speedDist(8.0f, 14.0f);
+    bool locked = false;
+    for (int i = 0; i < 200 && !locked; ++i) {
+        float v = speedDist(rng);
+        locked = eng.feedCalibrationSample(v, kPinned * v);
+    }
+    assert(locked);
+    float pinnedBefore = eng.getGearRatios()[2];
+    assert(std::fabs(pinnedBefore - kPinned) < 0.5f);
+
+    // Feed many passive ratios scattered around the OTHER gears and run K-Means.
+    std::uniform_real_distribution<float> noise(-0.3f, 0.3f);
+    float others[4] = {20.0f, 15.0f, 8.0f, 6.0f};
+    for (int i = 0; i < 400; ++i) eng.updateWelford(others[i % 4] + noise(rng));
+    eng.runKMeans();
+
+    auto r = eng.getGearRatios();
+    // Pinned gear index 2 is unchanged (not migrated, not nudged).
+    assert(std::fabs(r[2] - pinnedBefore) < 1e-3f);
+    // Strict descending order preserved.
+    for (int g = 1; g < 5; ++g) assert(r[g] < r[g - 1]);
+    std::printf("PASS test_pin_survives_kmeans: pinned[2]=%.4f order ok\n", r[2]);
+}
+
 int main() {
     test_ransac_clean_line();
     test_ransac_with_outliers();
@@ -173,6 +208,7 @@ int main() {
     test_order_break_reject();
     test_legacy_deserialise();
     test_serialise_roundtrip();
+    test_pin_survives_kmeans();
     std::printf("All tests passed.\n");
     return 0;
 }

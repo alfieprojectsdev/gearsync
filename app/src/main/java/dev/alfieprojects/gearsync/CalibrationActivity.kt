@@ -29,6 +29,10 @@ class CalibrationActivity : AppCompatActivity(), NativeEngine.CalibrationListene
 
     private var activeGear: Int = -1
 
+    // Gears locked this session — kept disabled in the grid so the user can still
+    // reach and calibrate the remaining gears after a successful lock. (ref: review R-ui)
+    private val lockedGears = mutableSetOf<Int>()
+
     private val choreographerCallback = object : Choreographer.FrameCallback {
         // ~10 Hz poll of native capture progress while a gear is being captured.
         // Self-reposts only while activeGear >= 0, so it pauses when idle/not visible.
@@ -100,7 +104,11 @@ class CalibrationActivity : AppCompatActivity(), NativeEngine.CalibrationListene
         statusText.text = getString(R.string.calib_pick_gear)
         progressRing.visibility = View.GONE
         btnCancel.visibility = View.GONE
-        gearButtons.forEach { it.isEnabled = true }
+        // Re-enable every gear except those already locked this session, so the user
+        // can keep calibrating the rest after a successful lock. (ref: review R-ui)
+        gearButtons.forEachIndexed { index, button ->
+            button.isEnabled = index !in lockedGears
+        }
     }
 
     // NativeEngine.CalibrationListener implementation.
@@ -114,10 +122,11 @@ class CalibrationActivity : AppCompatActivity(), NativeEngine.CalibrationListene
             Toast.makeText(this, R.string.calib_lock_failed, Toast.LENGTH_LONG).show()
             showGearGrid()
         } else {
+            lockedGears += gear
             progressRing.setProgress(1f)
-            statusText.text = getString(R.string.calib_locked, gear + 1)
-            gearButtons.getOrNull(gear)?.isEnabled = false
-            btnCancel.visibility = View.GONE
+            Toast.makeText(this, getString(R.string.calib_locked, gear + 1), Toast.LENGTH_SHORT).show()
+            // Return to the grid with the locked gear disabled and the rest reachable.
+            showGearGrid()
         }
     }
 

@@ -191,20 +191,25 @@ static void dspWorkerFn() {
                 // feedCalibrationSample suppresses passive feeding for the duration of a
                 // capture session. (ref: DL-005, C-001)
                 bool locked = false;
+                int  calibratingGear = -1;
                 if (g_calibEngine.isCalibrating()) {
+                    // Cache the gear under capture BEFORE the feed: a successful lock
+                    // resets m_calibGear to -1, and classifyGear(ratio) would reclassify
+                    // only the last sample — which the asymmetric band can map to -1 or a
+                    // neighbour even on a good fit, misreporting the lock. (ref: DL-003)
+                    calibratingGear = g_calibEngine.calibratingGear();
                     locked = g_calibEngine.feedCalibrationSample(speed, hz);
                 } else {
                     g_calibEngine.updateWelford(ratio);
                 }
 
-                // Fire the upcall after feedCalibrationSample returns (m_mutex released).
-                // classifyGear re-derives the gear from the just-written ratio, since
-                // m_calibGear is already reset to -1 by the time we reach here.
-                // (ref: DL-003)
-                if (locked && attached && g_engClass && g_onGearCalibrated) {
-                    int lockedGear = g_calibEngine.classifyGear(ratio);
+                // Fire the upcall after feedCalibrationSample returns (m_mutex released),
+                // reporting the exact gear the user calibrated. The order-break guard in
+                // feedCalibrationSample guarantees that gear stays at its index. (ref: DL-003)
+                if (locked && attached && g_engClass && g_onGearCalibrated &&
+                    calibratingGear >= 0) {
                     dspEnv->CallStaticVoidMethod(g_engClass, g_onGearCalibrated,
-                                                 static_cast<jint>(lockedGear));
+                                                 static_cast<jint>(calibratingGear));
                     // A failed callback must not crash the DSP thread.
                     if (dspEnv->ExceptionCheck()) dspEnv->ExceptionClear();
                 }

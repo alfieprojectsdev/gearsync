@@ -65,14 +65,18 @@ void CalibrationEngine::seedCentroids(const float* seeds, int n, float tolLow, f
 void CalibrationEngine::beginGearCalibration(int gearIndex) {
     if (gearIndex < 0 || gearIndex >= NUM_GEARS) return;
     std::lock_guard<std::mutex> lk(m_mutex);
-    m_calibGear = gearIndex;
+    m_calibGear      = gearIndex;
+    m_captureSamples = 0;
     m_capture.clear();
+    m_capture.v.reserve(RANSAC_MAX_CAPTURE);
+    m_capture.f.reserve(RANSAC_MAX_CAPTURE);
 }
 
 // Return to passive mode and discard all captured samples. (ref: DL-006)
 void CalibrationEngine::cancelCalibration() {
     std::lock_guard<std::mutex> lk(m_mutex);
-    m_calibGear = -1;
+    m_calibGear      = -1;
+    m_captureSamples = 0;
     m_capture.clear();
 }
 
@@ -177,12 +181,14 @@ float CalibrationEngine::calibrationProgress() const {
 // is called again.
 //
 // Lock sequence:
-//   1. Accumulate sample.
+//   1. Accumulate sample into a bounded sliding window.
 //   2. Gate: need N_min samples and Delta_v_min speed spread.
-//   3. ransacFit: reject if inlier count or fraction too low.
-//   4. Monotonicity guard: reject if fitted k_g breaks strict descending order.
-//   5. Write m_gearRatios[g], set m_pinned[g], re-sort both arrays.
-//   6. Release m_mutex before returning true (caller fires JVM upcall). (ref: DL-003)
+//   3. Throttle: only attempt a fit every RANSAC_REFIT_INTERVAL gated samples.
+//   4. ransacFit: reject if inlier count or fraction too low.
+//   5. Monotonicity guard: reject if fitted k_g breaks strict descending order.
+//   6. Write m_gearRatios[g], set m_pinned[g] (no re-sort — the guard already
+//      keeps the array descending, so re-sorting would only mislabel pins).
+//   7. Release m_mutex before returning true (caller fires JVM upcall). (ref: DL-003)
 bool CalibrationEngine::feedCalibrationSample(float speed, float hz) {
     if (speed <= 0.0f || hz <= 0.0f) return false;
 
@@ -191,6 +197,15 @@ bool CalibrationEngine::feedCalibrationSample(float speed, float hz) {
 
     m_capture.v.push_back(speed);
     m_capture.f.push_back(hz);
+    ++m_captureSamples;
+
+    // Bound the capture: evict the oldest batch once it exceeds the window cap so
+    // a stalled session cannot grow the vectors (or the RANSAC scan) without limit.
+    // Batch eviction keeps this amortised O(1) per sample. (ref: review R-perf)
+    if (static_cast<int>(m_capture.v.size()) > RANSAC_MAX_CAPTURE + RANSAC_CAPTURE_PRUNE) {
+        m_capture.v.erase(m_capture.v.begin(), m_capture.v.begin() + RANSAC_CAPTURE_PRUNE);
+        m_capture.f.erase(m_capture.f.begin(), m_capture.f.begin() + RANSAC_CAPTURE_PRUNE);
+    }
 
     const int n = static_cast<int>(m_capture.v.size());
     if (n < RANSAC_N_MIN) return false;
@@ -200,6 +215,10 @@ bool CalibrationEngine::feedCalibrationSample(float speed, float hz) {
     float vMin = *std::min_element(m_capture.v.begin(), m_capture.v.end());
     float vMax = *std::max_element(m_capture.v.begin(), m_capture.v.end());
     if (vMax - vMin < RANSAC_DELTA_V_MIN) return false;
+
+    // Throttle the O(K·n) refit: once the gates are met, attempt a fit only every
+    // RANSAC_REFIT_INTERVAL gated samples instead of on every sample. (ref: review R-perf)
+    if (m_captureSamples % RANSAC_REFIT_INTERVAL != 0) return false;
 
     float kFit = 0.0f;
     if (!ransacFit(m_capture, kFit)) return false;
@@ -211,30 +230,21 @@ bool CalibrationEngine::feedCalibrationSample(float speed, float hz) {
     if (g > 0 && kFit >= m_gearRatios[g - 1]) orderOk = false;
     if (g < NUM_GEARS - 1 && kFit <= m_gearRatios[g + 1]) orderOk = false;
     if (!orderOk) {
-        m_calibGear = -1;
+        m_calibGear      = -1;
+        m_captureSamples = 0;
         m_capture.clear();
         return false;
     }
 
-    m_gearRatios[g] = kFit;
-    m_pinned[g]     = true;  // prevent K-Means from re-nudging this centroid (ref: DL-002)
-    m_calibGear     = -1;
+    // The guard above guarantees kFit sits strictly between its neighbours, so the
+    // array stays sorted descending after this write — no re-sort needed. Re-sorting
+    // here (and permuting m_pinned with it) was the bug that let a pin migrate to a
+    // different public gear index. Pin flags stay bound to their gear index. (ref: DL-002)
+    m_gearRatios[g]  = kFit;
+    m_pinned[g]      = true;  // prevent K-Means from re-nudging this centroid (ref: DL-002)
+    m_calibGear      = -1;
+    m_captureSamples = 0;
     m_capture.clear();
-
-    // Re-sort descending: gear 1 (index 0) always has the highest ratio.
-    // Pin flags move with their ratios through the permutation. (ref: C-004)
-    int idx[NUM_GEARS];
-    std::iota(idx, idx + NUM_GEARS, 0);
-    std::sort(idx, idx + NUM_GEARS,
-              [&](int a, int b) { return m_gearRatios[a] > m_gearRatios[b]; });
-    std::array<float, NUM_GEARS> sortedRatios = {};
-    std::array<bool,  NUM_GEARS> sortedPinned = {};
-    for (int i = 0; i < NUM_GEARS; ++i) {
-        sortedRatios[i] = m_gearRatios[idx[i]];
-        sortedPinned[i] = m_pinned[idx[i]];
-    }
-    m_gearRatios = sortedRatios;
-    m_pinned     = sortedPinned;
 
     // Unlock before returning: the DSP worker fires onGearCalibrated only after
     // this function returns, ensuring m_mutex is never held across the JVM upcall.
@@ -342,6 +352,7 @@ void CalibrationEngine::reset() {
     m_tolHigh           = 0.0f;
     m_pinned            = {};
     m_calibGear         = -1;
+    m_captureSamples    = 0;
     m_capture.clear();
 }
 
@@ -406,25 +417,32 @@ void CalibrationEngine::runKMeansInternal(std::vector<float>& samples) {
         if (converged) break;
     }
 
-    // Merge updated unpinned centroids back into m_gearRatios; pinned slots are
-    // unchanged (their seeded/locked value is preserved).
+    // Pinned slots stay FIXED at their gear index (a guided lock owns gear g, not
+    // "whatever value lands at slot g"). Only the unpinned centroids are reordered,
+    // into the unpinned slots, in descending order. m_pinned is never permuted —
+    // permuting it was the bug that migrated a lock to a different public gear index.
+    // (ref: DL-002, review R-pin)
+    std::vector<float> unpinnedVals;
+    unpinnedVals.reserve(NUM_GEARS);
     for (int g = 0; g < NUM_GEARS; ++g) {
-        if (!m_pinned[g]) m_gearRatios[g] = centroids[g];
+        if (!m_pinned[g]) unpinnedVals.push_back(centroids[g]);
     }
-    // Re-sort descending so the gear-1-highest-ratio invariant holds even when an
-    // unpinned centroid crossed a pinned neighbour. Pin flags move with ratios.
-    // (ref: C-004)
-    int idx[NUM_GEARS];
-    std::iota(idx, idx + NUM_GEARS, 0);
-    std::sort(idx, idx + NUM_GEARS,
-              [&](int a, int b) { return m_gearRatios[a] > m_gearRatios[b]; });
-    std::array<float, NUM_GEARS> sorted    = {};
-    std::array<bool,  NUM_GEARS> sortedPin = {};
-    for (int i = 0; i < NUM_GEARS; ++i) {
-        sorted[i]    = m_gearRatios[idx[i]];
-        sortedPin[i] = m_pinned[idx[i]];
+    std::sort(unpinnedVals.begin(), unpinnedVals.end(), std::greater<float>());
+    for (int g = 0, u = 0; g < NUM_GEARS; ++g) {
+        if (!m_pinned[g]) m_gearRatios[g] = unpinnedVals[u++];
     }
-    m_gearRatios = sorted;
-    m_pinned     = sortedPin;
+
+    // Repair strict-descending order by nudging ONLY unpinned slots against the
+    // fixed pinned anchors (pinned ratios are mutually descending by construction:
+    // each lock was order-checked against its neighbours). Forward pass pulls a slot
+    // below its predecessor; backward pass pushes it above its successor.
+    for (int g = 1; g < NUM_GEARS; ++g) {
+        if (!m_pinned[g] && m_gearRatios[g] >= m_gearRatios[g - 1])
+            m_gearRatios[g] = std::nextafterf(m_gearRatios[g - 1], -FLT_MAX);
+    }
+    for (int g = NUM_GEARS - 2; g >= 0; --g) {
+        if (!m_pinned[g] && m_gearRatios[g] <= m_gearRatios[g + 1])
+            m_gearRatios[g] = std::nextafterf(m_gearRatios[g + 1], FLT_MAX);
+    }
     m_calibrated = true;
 }

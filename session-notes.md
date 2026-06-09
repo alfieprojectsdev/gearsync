@@ -155,7 +155,7 @@ Was missing everything needed to build. Added:
 
 ### Commits this session (on `main`, ahead of origin)
 
-```
+```text
 ad8d249 docs: add guided calibration implementation plan
 da66bf9 docs: add guided per-gear calibration design note (RANSAC)
 eecce93 build: add gradle wrapper, gradle.properties, NDK pin, launcher icons
