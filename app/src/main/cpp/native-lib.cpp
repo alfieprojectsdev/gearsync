@@ -441,7 +441,7 @@ Java_dev_alfieprojects_gearsync_NativeEngine_updateGpsSpeed(JNIEnv*, jclass, jfl
 //                    confidence, shiftDetected (1.0 = shift event pending)]
 // shiftDetected is cleared (consumed) on each read so the flash is one-shot.
 JNIEXPORT jfloatArray JNICALL
-Java_dev_alfieprojects_gearsync_NativeEngine_getVUMeterState(JNIEnv* env, jclass) {
+Java_dev_alfieprojects_gearsync_NativeEngine_nativeVUMeterState(JNIEnv* env, jclass) {
     jfloatArray result = env->NewFloatArray(6);
     if (!result) return nullptr;
 
