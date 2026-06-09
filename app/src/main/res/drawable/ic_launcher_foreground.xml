@@ -1,31 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive icon foreground: VU-meter gauge (270deg arc) with a needle in the
-     redline/upshift position. White arc + green needle = GearSync brand.
-     Drawn inside the center safe zone (margins ~18dp of the 108 viewport). -->
+<!-- Adaptive icon foreground: ascending segmented VU bars (lug-cyan → optimal-green
+     → shift-red), mirroring the app's horizontal segmented meter and reading as
+     climbing revs toward an upshift. Round stroke caps = the meter's rounded
+     segments. Drawn inside the 108 viewport center safe zone (~22–86). Brand
+     colors match res/values/colors.xml (vu_lug/opt/shift_segment). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Sweeping arc: 270deg, from 135deg (bottom-left) clockwise to 45deg (top-right). -->
-    <path
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="5"
-        android:strokeLineCap="round"
-        android:fillColor="#00000000"
-        android:pathData="M40.36,67.64
-                          A26,26 0 1 1 67.64,67.64" />
+    <!-- Lug zone (cyan) — two shortest bars. -->
+    <path android:strokeColor="#00D4FF" android:strokeWidth="8"
+          android:strokeLineCap="round" android:pathData="M32,78 L32,66" />
+    <path android:strokeColor="#00D4FF" android:strokeWidth="8"
+          android:strokeLineCap="round" android:pathData="M43.5,78 L43.5,57" />
 
-    <!-- Needle pivot. -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,54 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+    <!-- Optimal zone (green) — mid bars. -->
+    <path android:strokeColor="#00E676" android:strokeWidth="8"
+          android:strokeLineCap="round" android:pathData="M55,78 L55,48" />
+    <path android:strokeColor="#00E676" android:strokeWidth="8"
+          android:strokeLineCap="round" android:pathData="M66.5,78 L66.5,39" />
 
-    <!-- Needle pointing toward the redline (upper-right) zone. -->
-    <path
-        android:strokeColor="#27AE60"
-        android:strokeWidth="4"
-        android:strokeLineCap="round"
-        android:pathData="M54,54 L70,42" />
+    <!-- Shift / redline zone (red) — tallest bar. -->
+    <path android:strokeColor="#FF1744" android:strokeWidth="8"
+          android:strokeLineCap="round" android:pathData="M78,78 L78,30" />
 </vector>
