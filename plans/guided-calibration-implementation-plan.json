@@ -1,0 +1,895 @@
+{
+  "plan_id": "88374ff9-d0bf-49dc-a0ff-99573e1b427d",
+  "created_at": "2026-06-08T06:39:20.143494",
+  "frozen_at": null,
+  "overview": {
+    "problem": "Passive K-Means auto-calibration cannot target a specific gear, converges only when the driver happens to cruise steadily in each gear, and offers no supervised recovery after a tire change or pressure shift. Drivers lack an optional, deliberate way to fit one gear directly from varied steady-speed (v,f) samples while the passive default keeps working untouched.",
+    "approach": "An additive guided-calibration mode layers onto CalibrationEngine alongside the passive path. A CAPTURING(g) state machine routes gated (v,f) pairs into a single capture buffer; a RANSAC line-through-origin slope fit (single-point minimal model, relative residual band, speed-spread guard, inlier-fraction acceptance) locks m_gearRatios[g] and sets a per-gear pin flag that excludes the gear from later K-Means reassignment. Persisted state migrates from 8 to 13 floats (3 Welford + 5 ratios + 5 pin flags) with pad-and-default back-compat on deserialise. A C++ to Kotlin onGearCalibrated callback fires from the DSP worker thread using a JNI_OnLoad-cached JavaVM and startEngine-cached global jclass/jmethodID, released outside m_mutex. A dedicated CalibrationActivity drives a gear-grid plus Choreographer progress-ring UI, reusing VUMeterView Canvas patterns. The RANSAC fit is host-unit-tested as plain C++ before on-device validation."
+  },
+  "planning_context": {
+    "decisions": [
+      {
+        "id": "DL-001",
+        "version": 1,
+        "decision": "Estimate guided gear slope with RANSAC line-through-origin, not Welford-on-ratio",
+        "reasoning": "Within a gear f=k_g*v is a line through origin and guided capture deliberately spans a speed range -> the estimator must be a robust slope fit with inlier rejection -> RANSAC samples single-point candidate slopes k=f/v, counts inliers in a relative residual band, and least-squares-refits inliers, rejecting clutch-slip/pothole/mis-peak samples that the steady-state gate alone misses; Welford-on-ratio is only valid at constant speed and is biased by any slip sample inside the gate -> choose RANSAC."
+      },
+      {
+        "id": "DL-002",
+        "version": 1,
+        "decision": "Pin guided-locked gears and migrate persisted state from 8 to 13 floats",
+        "reasoning": "A deliberate calibration must not be washed out by later incidental K-Means nudging -> guided-locked gears need a persisted per-gear pin flag that runKMeans honors by leaving pinned centroids fixed -> 5 pin flags appended as trailing floats bump the state array 8->13 (3 Welford + 5 ratios + 5 pins); old 8-float SharedPreferences must still load -> deserialise pads missing pin flags to 0.0 (unpinned) by length-checking before reading the pin block."
+      },
+      {
+        "id": "DL-003",
+        "version": 1,
+        "decision": "Fire onGearCalibrated from the DSP worker via cached JavaVM and global refs, released outside m_mutex",
+        "reasoning": "The lock event originates on the DSP worker thread which is not JVM-attached and fires long after startEngine returns -> local jclass/jmethodID refs would be invalid and a fresh FindClass on an unattached thread fails -> cache JavaVM in JNI_OnLoad and a NewGlobalRef jclass + static jmethodID in startEngine, attach the worker thread to the JVM once at thread start and detach at exit -> additionally the callback must not hold m_mutex across the JVM upcall (deadlock/reentrancy risk) so feedCalibrationSample returns the locked gear index and native-lib fires the upcall after the engine call returns."
+      },
+      {
+        "id": "DL-004",
+        "version": 1,
+        "decision": "Drive guided calibration from a dedicated CalibrationActivity, not a MainActivity mode flag",
+        "reasoning": "Guided mode has its own permission precondition (RECORD_AUDIO + location already granted), lifecycle (poll progress at ~10 Hz, register an onGearCalibrated listener), and screen flow (gear grid -> capture -> confirm) -> folding this into MainActivity entangles two unrelated lifecycles and gating paths -> a dedicated Activity gives a clean permission/lifecycle story and an isolated listener registration -> choose CalibrationActivity launched by a button from MainActivity."
+      },
+      {
+        "id": "DL-005",
+        "version": 1,
+        "decision": "Pause passive K-Means and reject monotonicity-breaking locks during guided capture",
+        "reasoning": "While CAPTURING(g) the same gated samples would otherwise feed both updateWelford and the capture buffer, double-moving the centroid -> guided capture must suppress passive Welford/K-Means feeding for the duration -> on lock, m_gearRatios must remain strictly descending because classifyGear nearest-centroid and needle mapping depend on it -> a fitted k_g that would break ordering versus its neighbors is rejected and reported as a failed lock rather than written."
+      },
+      {
+        "id": "DL-006",
+        "version": 1,
+        "decision": "Keep guided capture in-session only with a single capture buffer",
+        "reasoning": "Only one gear is calibrated at a time and partial captures across an app kill add persistence complexity for little benefit -> a single GearCapture buffer (not 5) holds the gear under capture, cleared on begin/cancel/lock -> capture state is transient and never serialised; only the resulting m_gearRatios and pin flags persist -> matches the deliberate, continuous-session framing."
+      },
+      {
+        "id": "DL-007",
+        "version": 1,
+        "decision": "Host-unit-test the RANSAC fit as plain C++ before device",
+        "reasoning": "CalibrationEngine is pure and Android-free while the JNI callback and full audio/sensor pipeline can only run on a physical arm64 device -> the highest-risk numeric logic (RANSAC slope fit, inlier counting, spread guard, acceptance) can be validated cheaply off-device -> add a standalone host C++ test compiled without the NDK that exercises ransacFit on synthetic inlier+outlier point sets -> device testing then focuses on JNI ref scope/attach correctness and end-to-end capture."
+      }
+    ],
+    "rejected_alternatives": [
+      {
+        "id": "RA-001",
+        "alternative": "Estimate the guided gear slope with Welford-on-ratio over gated samples",
+        "rejection_reason": "Only valid when speed is held constant; has no inlier rejection and is biased by clutch-slip samples that pass the steady-state gate. RANSAC degrades gracefully when speed wanders, which is exactly what varied-speed capture produces.",
+        "decision_ref": "DL-001"
+      },
+      {
+        "id": "RA-002",
+        "alternative": "Let K-Means keep re-nudging guided-locked gears (no pinning)",
+        "rejection_reason": "Washes out a deliberate calibration with later incidental noise, defeating the purpose of guided mode.",
+        "decision_ref": "DL-002"
+      },
+      {
+        "id": "RA-003",
+        "alternative": "Reuse MainActivity with a mode flag for the calibration UI",
+        "rejection_reason": "Entangles two unrelated lifecycles, permission-gating paths, and listener registrations. A dedicated CalibrationActivity gives a cleaner permission/lifecycle story.",
+        "decision_ref": "DL-004"
+      },
+      {
+        "id": "RA-004",
+        "alternative": "Keep per-gear capture buffers for all 5 gears",
+        "rejection_reason": "Only one gear is captured at a time; five buffers add state for no benefit. A single GearCapture buffer suffices.",
+        "decision_ref": "DL-006"
+      },
+      {
+        "id": "RA-005",
+        "alternative": "Attach/detach the DSP worker to the JVM on every onGearCalibrated callback",
+        "rejection_reason": "Locks are infrequent but attach/detach per call is wasteful and easy to leak. Attaching the worker once at thread start and detaching at exit is cheaper and the preferred plumbing.",
+        "decision_ref": "DL-003"
+      }
+    ],
+    "constraints": [
+      "C-001 (technical, user-specified): Passive K-Means auto-calibration stays the default and is never removed; guided mode is additive only.",
+      "C-002 (technical, user-specified): No audio output (v2 is visual-only); no cloud, no OBD-II; FFT and sensor pipeline unchanged; no new vehicle_config.json fields.",
+      "C-003 (technical, doc-derived): All incoming floats in deserialise are validated (isfinite, n>=0, m2>=0, finite ratios, pin flags in {0,1}) before any state is mutated.",
+      "C-004 (technical, doc-derived): onGearCalibrated must fire outside m_mutex; m_gearRatios stays strictly descending; m_calibrated stays true throughout guided mode.",
+      "C-005 (technical, doc-derived): JNI externals stay matched: 7 current Java_dev_alfieprojects_gearsync_NativeEngine_* exports grow to 10 (3 new Kt->C++), plus 1 C++->Kt onGearCalibrated upcall; mismatch yields UnsatisfiedLinkError.",
+      "C-006 (technical, doc-derived): UI strings go to strings.xml and colors to colors.xml; no hardcoded literals. New vehicle = edit vehicle_config.json, no recompile.",
+      "C-007 (technical, doc-derived): NativeEngine (including the new onGearCalibrated @JvmStatic) is kept by the existing proguard -keep class ...NativeEngine { *; } rule.",
+      "C-008 (dependency, user-specified): Build verifiable only locally: NDK 27.1.12297006 + physical arm64 device via ./gradlew assembleDebug; emulator cannot exercise the sensor/audio pipeline.",
+      "C-009 (technical, user-specified): Speed-range coaching beyond the Delta-v_min gate and cross-app-kill capture persistence are out of scope; capture is in-session only."
+    ],
+    "risks": [
+      {
+        "id": "R-001",
+        "risk": "Wrong JNI ref scope or a missing DetachCurrentThread crashes the process when onGearCalibrated fires from the unattached DSP worker.",
+        "mitigation": "Cache JavaVM in JNI_OnLoad; cache NewGlobalRef jclass + static jmethodID in startEngine; attach the worker once at thread start and detach at exit; delete the global ref in stopEngine. Validate on a physical arm64 device.",
+        "anchor": "app/src/main/cpp/native-lib.cpp:130",
+        "decision_ref": "DL-003"
+      },
+      {
+        "id": "R-002",
+        "risk": "Persistence migration corrupts state when an old 8-float blob is read as 13 floats.",
+        "mitigation": "Length-gate deserialise to read pin flags only when len>=13, else default all pins to 0.0; serialise always writes 13; ShiftAssistantService reads CALIBRATION_STATE_LEN=13 with per-key getFloat defaults so missing cal_8..cal_12 keys default to 0.0.",
+        "anchor": "app/src/main/cpp/CalibrationEngine.cpp:96",
+        "decision_ref": "DL-002"
+      },
+      {
+        "id": "R-003",
+        "risk": "A noisy or single-speed capture locks a garbage k_g, or a fitted k_g breaks the strict-descending gear ordering classifyGear depends on.",
+        "mitigation": "Require N_min inliers, inlier fraction >= 0.6, and Delta-v_min speed spread before locking; reject and report failure when the fitted k_g would break monotonic order versus neighbors.",
+        "anchor": "app/src/main/cpp/CalibrationEngine.cpp:143",
+        "decision_ref": "DL-005"
+      },
+      {
+        "id": "R-004",
+        "risk": "Holding m_mutex across the onGearCalibrated JVM upcall deadlocks if the Kotlin listener re-enters a native method.",
+        "mitigation": "feedCalibrationSample returns the locked gear index (or -1); native-lib fires the upcall only after the engine call returns and the lock is released.",
+        "anchor": "app/src/main/cpp/native-lib.cpp:159",
+        "decision_ref": "DL-003"
+      }
+    ]
+  },
+  "invisible_knowledge": {
+    "system": "Guided calibration is an optional, additive mode orthogonal to the passive pipeline. ShiftAssistantService.onCreate seeds theoretical k_g (classifyGear works from first drive) and the DSP worker refines centroids via gated Welford+K-Means. The guided path adds a CAPTURING(g) state: while active, gated (v,f) pairs route into a single capture buffer instead of feeding Welford, RANSAC fits the gear slope on lock, the gear is pinned against future K-Means drift, and onGearCalibrated upcalls Kotlin from the DSP worker thread. CalibrationActivity polls getCalibrationProgress at ~10 Hz for a Choreographer progress ring and registers a listener for the lock event.",
+    "invariants": [
+      "m_gearRatios is sorted strictly descending (gear 1 = index 0 = highest ratio); classifyGear nearest-centroid and needle mapping depend on it. Guided locks and K-Means must preserve this order.",
+      "classifyGear tolerance band is asymmetric [k*tolLow, k*tolHigh] (Wigo [0.98, 1.025]); outside the band for all gears returns -1/unknown to prevent flicker. Guided mode does not change this.",
+      "m_calibrated stays true throughout guided mode; seeds are already valid, so a guided lock only sharpens one centroid and never un-calibrates.",
+      "Persisted state layout is [n, mean, m2, ratio0..ratio4, pin0..pin4] = 13 floats; the first 8 are byte-compatible with the legacy layout so old prefs load unchanged.",
+      "The onGearCalibrated upcall fires from the DSP worker thread strictly outside m_mutex; refs are global (jclass via NewGlobalRef, static jmethodID), never local."
+    ],
+    "tradeoffs": [
+      "Pinning adds 5 persisted floats (8->13) purely for calibration fidelity; accepted because pad-and-default deserialise keeps old prefs loadable.",
+      "Guided capture encourages varied steady speeds (not one held speed) so the line-through-origin slope is well-conditioned; the Delta-v_min gate enforces spread at the cost of a slightly longer capture.",
+      "RANSAC params (N_min=20, eps=0.03*f, K=100, Delta-v_min=2.0 m/s, inlier frac>=0.6) are reasonable starting values to be tuned on-device; the host unit test validates the algorithm, not the final constants.",
+      "Attaching the DSP worker to the JVM once at thread start (vs per-callback) is cheaper but means the worker carries a JVM attachment for its whole lifetime; acceptable for a single long-lived thread."
+    ]
+  },
+  "milestones": [
+    {
+      "id": "M-001",
+      "version": 1,
+      "number": 1,
+      "name": "C++ guided-calibration engine: RANSAC fit, capture state machine, pinning, persistence migration",
+      "files": [
+        "app/src/main/cpp/CalibrationEngine.h",
+        "app/src/main/cpp/CalibrationEngine.cpp",
+        "app/src/main/cpp/test/test_ransac_host.cpp"
+      ],
+      "flags": [
+        "error-handling",
+        "needs-rationale"
+      ],
+      "requirements": [
+        "beginGearCalibration(g)/cancelCalibration/isCalibrating/calibratingGear/feedCalibrationSample/calibrationProgress added to CalibrationEngine||single GearCapture buffer holds the gear under capture; cleared on begin",
+        "cancel",
+        "and lock||feedCalibrationSample appends a gated (speed",
+        "hz) pair",
+        "runs RANSAC when N_min inliers and Delta-v_min spread are met",
+        "and returns the locked gear index on success or -1 otherwise||ransacFit performs single-point line-through-origin slope fit with relative residual band eps=0.03*f",
+        "K iterations",
+        "inlier fraction >=0.6 acceptance",
+        "and least-squares refit over inliers||a lock writes m_gearRatios[g]",
+        "sets m_pinned[g]=true",
+        "and re-validates strict-descending order; an order-breaking fit is rejected without writing||runKMeans leaves pinned centroids fixed (skips them in reassignment)||serialise writes 13 floats [n",
+        "mean",
+        "m2",
+        "ratio0..4",
+        "pin0..4]; deserialise validates all values then loads",
+        "padding pins to 0.0 when len<13||reset clears guided pins||passive Welford feeding is suppressed while CAPTURING"
+      ],
+      "acceptance_criteria": [
+        "Host C++ test compiles and runs without the NDK and asserts ransacFit recovers a known slope within tolerance from synthetic inliers mixed with outliers||Host test asserts a zero-spread point set is rejected and a >=Delta-v_min spread set locks||Host test asserts deserialise of an 8-float legacy array leaves pins all false and a 13-float array restores pins||Host test asserts a fit that would break descending order versus neighbors is rejected||serialise/deserialise round-trip of a 13-float array is identity for finite valid input||classifyGear behavior for unchanged centroids is unchanged"
+      ],
+      "tests": [
+        "type:unit||backing:doc-derived||file:app/src/main/cpp/test/test_ransac_host.cpp||normal:recover known slope from clean inliers||edge:zero speed-spread rejected; exactly N_min inliers locks; pinned gear untouched by runKMeans||error:8-float legacy deserialise pads pins to false; non-finite/negative inputs leave state untouched; order-breaking fit rejected"
+      ],
+      "code_intents": [
+        {
+          "id": "CI-M-001-001",
+          "version": 2,
+          "file": "app/src/main/cpp/CalibrationEngine.h",
+          "function": "CalibrationEngine (class surface)",
+          "behavior": "The class declares a guided-calibration surface: beginGearCalibration(int gearIndex), cancelCalibration(), bool isCalibrating() const, int calibratingGear() const, bool feedCalibrationSample(float speed, float hz), and float calibrationProgress() const. Private members hold a single GearCapture struct {std::vector<float> v, f;} as m_capture, an int m_calibGear (-1 = IDLE), a std::array<bool,NUM_GEARS> m_pinned, and a private bool ransacFit(const GearCapture&, float& kOut) const. The existing RNG member m_rng is declared mutable so the const ransacFit may draw random sample indices without dropping const-correctness; ransacFit mutates no engine state other than the RNG. RANSAC tuning constants (N_min=20, residual fraction 0.03, iterations 100, min speed spread 2.0 m/s, inlier fraction 0.6) are declared as named constexpr values near the existing K-Means constants. The serialise/deserialise contract is documented as 13 floats [n, mean, m2, ratio0..4, pin0..4].",
+          "decision_refs": [
+            "DL-001",
+            "DL-002",
+            "DL-006"
+          ]
+        },
+        {
+          "id": "CI-M-001-002",
+          "version": 1,
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "function": "beginGearCalibration / cancelCalibration / isCalibrating / calibratingGear",
+          "behavior": "beginGearCalibration(g) takes m_mutex, validates 0<=g<NUM_GEARS, clears m_capture.v/m_capture.f, and sets m_calibGear=g. cancelCalibration() takes m_mutex, clears m_capture, and sets m_calibGear=-1. isCalibrating() returns m_calibGear>=0 and calibratingGear() returns m_calibGear, both under m_mutex.",
+          "decision_refs": [
+            "DL-006"
+          ]
+        },
+        {
+          "id": "CI-M-001-003",
+          "version": 2,
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "function": "feedCalibrationSample",
+          "behavior": "feedCalibrationSample(speed, hz) takes m_mutex; if not CAPTURING returns -1. It appends speed to m_capture.v and hz to m_capture.f. When the capture has at least N_min points AND the speed spread (max(v)-min(v)) >= the min-speed-spread constant, it runs ransacFit. On a successful fit producing kOut, it provisionally checks that writing m_gearRatios[m_calibGear]=kOut keeps the array strictly descending versus its immediate neighbors; if ordering holds it writes the ratio, sets m_pinned[m_calibGear]=true, captures the locked gear index, clears m_capture, sets m_calibGear=-1, and returns the locked index. If ordering would break it leaves m_gearRatios and pins unchanged, clears m_capture, and sets m_calibGear=-1 (CAPTURING -> IDLE), returning -1. This IDLE transition without an accompanying locked-index return is the observable signal of a rejected (order-breaking) lock that the JNI worker does not upcall (CI-M-002-003) and the activity surfaces as failure (CI-M-004-008). It returns -1 while still accumulating.",
+          "decision_refs": [
+            "DL-001",
+            "DL-005",
+            "DL-002"
+          ]
+        },
+        {
+          "id": "CI-M-001-004",
+          "version": 1,
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "function": "ransacFit",
+          "behavior": "ransacFit(capture, kOut) implements RANSAC line-through-origin: over K iterations it picks a random point i, forms candidate slope k=f[i]/v[i] (guarding v[i] above a small epsilon), and counts inliers where |f[j]-k*v[j]| <= 0.03*f[j]. It keeps the candidate with the most inliers, then refits kOut by least squares through the origin over that inlier set (kOut = sum(v*f)/sum(v*v) over inliers). It returns true only when the best inlier fraction >= 0.6, else false. It mutates no engine state (pure given the capture and m_rng).",
+          "decision_refs": [
+            "DL-001"
+          ]
+        },
+        {
+          "id": "CI-M-001-005",
+          "version": 1,
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "function": "calibrationProgress",
+          "behavior": "calibrationProgress() returns a [0,1] value under m_mutex: the minimum of inlier-count progress (current point count / N_min, clamped to 1) and speed-spread progress (current spread / min-speed-spread, clamped to 1), so the UI ring reflects both the sample-count and speed-range requirements. Returns 0 when not CAPTURING.",
+          "decision_refs": [
+            "DL-001"
+          ]
+        },
+        {
+          "id": "CI-M-001-006",
+          "version": 1,
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "function": "runKMeansInternal",
+          "behavior": "runKMeansInternal preserves pinned centroids: after computing updated centroids it restores m_gearRatios[g] to its prior pinned value for every g where m_pinned[g] is true (and excludes pinned values from being overwritten by the sorted assignment), so a guided-locked gear is never moved by passive refinement while unpinned gears still converge. Strict-descending order is preserved.",
+          "decision_refs": [
+            "DL-002",
+            "DL-005"
+          ]
+        },
+        {
+          "id": "CI-M-001-007",
+          "version": 1,
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "function": "serialise / deserialise / reset",
+          "behavior": "serialise writes 13 floats: indices 0-2 Welford (n,mean,m2), 3-7 gear ratios, 8-12 pin flags as 1.0/0.0 from m_pinned. deserialise validates all present values before mutating: isfinite on n/mean/m2 with n>=0 and m2>=0, isfinite on each ratio, and (when len>=13) each pin flag finite and effectively 0 or 1; it then loads Welford and ratios, and loads pins only when len>=13, otherwise defaults all m_pinned to false (legacy 8-float back-compat). reset() additionally clears m_pinned to all false and m_calibGear to -1 and m_capture.",
+          "decision_refs": [
+            "DL-002"
+          ]
+        },
+        {
+          "id": "CI-M-001-008",
+          "version": 1,
+          "file": "app/src/main/cpp/test/test_ransac_host.cpp",
+          "function": "main (host unit test)",
+          "behavior": "A standalone C++ test compiled without the NDK includes CalibrationEngine and exercises: (1) ransacFit recovers a known slope within tolerance from synthetic inliers plus injected outliers; (2) a zero speed-spread point set does not lock while a spread >= the min-speed-spread does; (3) deserialise of an 8-float legacy array leaves all pins false and a 13-float array restores pins; (4) a fit whose slope would break strict-descending order versus neighbors is rejected; (5) a 13-float serialise/deserialise round-trip is identity for valid finite input. It returns non-zero on any failed assertion. A small build note documents compiling it directly with the host C++ compiler.",
+          "decision_refs": [
+            "DL-007"
+          ]
+        }
+      ],
+      "code_changes": [
+        {
+          "id": "CC-M-001-001",
+          "version": 3,
+          "intent_ref": "CI-M-001-001",
+          "file": "app/src/main/cpp/CalibrationEngine.h",
+          "diff": "--- a/app/src/main/cpp/CalibrationEngine.h\n+++ b/app/src/main/cpp/CalibrationEngine.h\n@@ -1,7 +1,8 @@\n #pragma once\n \n #include <array>\n+#include <cstdint>\n #include <mutex>\n #include <random>\n #include <vector>\n@@ -22,6 +23,25 @@ struct WelfordState {\n     float m2   = 0.0f;\n };\n \n+// Capture buffer for one gear during guided calibration.\n+struct GearCapture {\n+    std::vector<float> v;  // speed samples (m/s)\n+    std::vector<float> f;  // frequency samples (Hz)\n+    void clear() { v.clear(); f.clear(); }\n+};\n+\n+// RANSAC parameters for guided per-gear fit.\n+static constexpr int   RANSAC_ITERATIONS         = 100;\n+static constexpr int   RANSAC_N_MIN              = 20;   // minimum inliers to accept fit\n+static constexpr float RANSAC_EPS_FRACTION       = 0.03f; // inlier band: 3% of f\n+static constexpr float RANSAC_INLIER_FRAC        = 0.6f;  // min inlier fraction to lock\n+static constexpr float RANSAC_DELTA_V_MIN        = 2.0f;  // m/s speed spread required\n+\n class CalibrationEngine {\n public:\n     CalibrationEngine() = default;\n@@ -48,10 +68,22 @@ public:\n     // Gear ratios sorted descending (gear 1 = highest ratio).\n     std::array<float, NUM_GEARS> getGearRatios() const;\n \n-    // Serialise the Welford state + gear ratios into a flat float array for JNI.\n-    // Layout: [n_as_float, mean, m2, ratio0…ratio4]  (8 floats total)\n+    // Guided calibration mode control.\n+    void beginGearCalibration(int gearIndex);\n+    void cancelCalibration();\n+    bool isCalibrating() const;\n+    int  calibratingGear() const;\n+\n+    // Feed a gated (speed, hz) pair during capture; returns true on successful lock.\n+    bool feedCalibrationSample(float speed, float hz);\n+\n+    // Progress in [0,1]: min(inlierCount / N_min, spreadProgress).\n+    float calibrationProgress() const;\n+\n+    // Serialise Welford state + gear ratios + pin flags into a flat float array.\n+    // Layout: [n_as_float, mean, m2, ratio0…ratio4, pin0…pin4]  (13 floats total)\n     void serialise(float* out, int len) const;\n \n-    // Restore Welford state + gear ratios from a flat float array coming from JNI.\n+    // Restore Welford state + gear ratios + pin flags from a flat float array.\n+    // Back-compat: if len == 8, pin flags default to 0.0 (unpinned).\n     void deserialise(const float* in, int len);\n \n     void reset();\n@@ -59,6 +91,7 @@ public:\n+protected:\n+    bool ransacFit(const GearCapture& cap, float& kOut) const;\n+\n private:\n     void runKMeansInternal(std::vector<float>& samples);\n \n     mutable std::mutex              m_mutex;\n     WelfordState                    m_state;\n     std::vector<float>              m_ratioSamples;\n@@ -69,4 +102,13 @@ private:\n     // Asymmetric tolerance band set by seedCentroids (0 = open/unconfigured).\n     // classifyGear accepts ratio r for centroid c when c*tolLow <= r <= c*tolHigh.\n     float                           m_tolLow  = 0.0f;\n     float                           m_tolHigh = 0.0f;\n+\n+    // Guided calibration state.\n+    GearCapture                     m_capture;\n+    int                             m_calibGear = -1;  // -1 = IDLE\n+\n+    // Pin flags: pinned gears are skipped in K-Means reassignment.\n+    std::array<bool, NUM_GEARS>     m_pinned = {};\n };",
+          "doc_diff": "--- a/app/src/main/cpp/CalibrationEngine.h\n+++ b/app/src/main/cpp/CalibrationEngine.h\n@@ -1,6 +1,12 @@\n #pragma once\n\n+// CalibrationEngine — gear-ratio learning and classification.\n+//\n+// Passive path (default): Welford online statistics + seeded K-Means++ refine\n+// gear-ratio centroids from live (hz, speed) pairs; seeds come from\n+// vehicle_config.json via seedCentroids, so classifyGear works from first drive.\n+//\n+// Guided path (additive): RANSAC slope fit on a deliberate per-gear capture\n+// overwrites and pins one centroid; K-Means skips pinned gears thereafter.\n+// (ref: DL-001, DL-002, DL-005)\n+\n #include <array>\n #include <cstdint>\n #include <mutex>\n@@ -23,9 +33,18 @@ struct WelfordState {\n     float m2   = 0.0f;\n };\n\n-// Capture buffer for one gear during guided calibration.\n+// Speed/frequency sample buffer for one guided-calibration capture session.\n+// Only one gear is captured at a time; cleared on begin, cancel, and lock.\n+// (ref: DL-006)\n struct GearCapture {\n-    std::vector<float> v;  // speed samples (m/s)\n-    std::vector<float> f;  // frequency samples (Hz)\n+    std::vector<float> v;  // GPS speed samples (m/s)\n+    std::vector<float> f;  // dominant FFT frequency samples (Hz)\n     void clear() { v.clear(); f.clear(); }\n };\n\n-// RANSAC parameters for guided per-gear fit.\n-static constexpr int   RANSAC_ITERATIONS         = 100;\n-static constexpr int   RANSAC_N_MIN              = 20;   // minimum inliers to accept fit\n-static constexpr float RANSAC_EPS_FRACTION       = 0.03f; // inlier band: 3% of f\n-static constexpr float RANSAC_INLIER_FRAC        = 0.6f;  // min inlier fraction to lock\n-static constexpr float RANSAC_DELTA_V_MIN        = 2.0f;  // m/s speed spread required\n+// Tunable RANSAC parameters — adjust on device after host-unit validation.\n+// (ref: DL-001, DL-007)\n+static constexpr int   RANSAC_ITERATIONS         = 100;      // candidate slopes per fit attempt\n+static constexpr int   RANSAC_N_MIN              = 20;        // min inliers to accept a fit\n+static constexpr float RANSAC_EPS_FRACTION       = 0.03f;    // inlier band width: 3 % of f\n+static constexpr float RANSAC_INLIER_FRAC        = 0.6f;     // min inlier fraction to lock\n+static constexpr float RANSAC_DELTA_V_MIN        = 2.0f;     // m/s speed spread required for lock\n@@ -68,11 +87,28 @@ public:\n     // Gear ratios sorted descending (gear 1 = highest ratio).\n     std::array<float, NUM_GEARS> getGearRatios() const;\n\n-    // Guided calibration mode control.\n+    // ── Guided calibration ────────────────────────────────────────────────────\n+\n+    // Begin capture for gearIndex (0-based). Clears any previous capture data.\n+    // Passive Welford/K-Means feeding is suppressed until cancelCalibration or lock.\n+    // No-op if gearIndex is out of range. (ref: DL-005, DL-006)\n     void beginGearCalibration(int gearIndex);\n+\n+    // Discard capture buffer and return engine to passive mode. (ref: DL-006)\n     void cancelCalibration();\n+\n+    // Returns true while a capture is active (beginGearCalibration called, not yet\n+    // locked or cancelled).\n     bool isCalibrating() const;\n+\n+    // Returns the 0-based gear index under capture, or -1 when idle.\n     int  calibratingGear() const;\n\n-    // Feed a gated (speed, hz) pair during capture; returns true on successful lock.\n+    // Feed a gated (speed, hz) pair to the capture buffer.\n+    // Returns true only when RANSAC locks successfully; on true, the fitted\n+    // k_g replaces m_gearRatios[g], sets m_pinned[g], and resets m_calibGear.\n+    // The caller (DSP worker in native-lib) fires onGearCalibrated *after* this\n+    // returns to avoid holding m_mutex across the JVM upcall. (ref: DL-003, DL-005)\n     bool feedCalibrationSample(float speed, float hz);\n\n-    // Progress in [0,1]: min(inlierCount / N_min, spreadProgress).\n+    // Capture progress in [0, 1]: min(sample_count/N_min, speed_spread/Delta_v_min).\n+    // Zero when no capture is active.\n     float calibrationProgress() const;\n\n-    // Serialise Welford state + gear ratios + pin flags into a flat float array.\n-    // Layout: [n_as_float, mean, m2, ratio0…ratio4, pin0…pin4]  (13 floats total)\n+    // ── Persistence ───────────────────────────────────────────────────────────\n+\n+    // Serialise Welford state + gear ratios + pin flags to a flat float array.\n+    // Layout: [n_float, mean, m2, ratio0..ratio4, pin0..pin4] = 13 floats.\n+    // Must match CALIBRATION_STATE_LEN in ShiftAssistantService. (ref: DL-002)\n     void serialise(float* out, int len) const;\n\n-    // Restore Welford state + gear ratios + pin flags from a flat float array.\n-    // Back-compat: if len == 8, pin flags default to 0.0 (unpinned).\n+    // Restore state from a flat float array.\n+    // Back-compat: len == 8 (old format) is accepted; pin flags default to\n+    // unpinned (0.0). Validates every incoming float before mutating state.\n+    // (ref: DL-002, C-003)\n     void deserialise(const float* in, int len);\n\n     void reset();\n\n+protected:\n+    // RANSAC line-through-origin slope fit on cap.\n+    // Samples one candidate k = f/v per iteration, counts inliers in a relative\n+    // residual band, then least-squares refits the best inlier set.\n+    // Returns false if N_min or RANSAC_INLIER_FRAC thresholds are not met.\n+    // Protected (not private) to allow access from CalibrationEngineTestable in\n+    // host unit tests. (ref: DL-001, DL-007)\n+    bool ransacFit(const GearCapture& cap, float& kOut) const;\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-001-002",
+          "version": 2,
+          "intent_ref": "CI-M-001-002",
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -1,6 +1,7 @@\n #include \"CalibrationEngine.h\"\n \n #include <algorithm>\n+#include <cassert>\n #include <cfloat>\n #include <cmath>\n #include <numeric>\n@@ -51,6 +52,55 @@ void CalibrationEngine::seedCentroids(const float* seeds, int n, float tolLow, float tolHigh) {\n     m_calibrated = true;\n }\n \n+void CalibrationEngine::beginGearCalibration(int gearIndex) {\n+    if (gearIndex < 0 || gearIndex >= NUM_GEARS) return;\n+    std::lock_guard<std::mutex> lk(m_mutex);\n+    m_calibGear = gearIndex;\n+    m_capture.clear();\n+}\n+\n+void CalibrationEngine::cancelCalibration() {\n+    std::lock_guard<std::mutex> lk(m_mutex);\n+    m_calibGear = -1;\n+    m_capture.clear();\n+}\n+\n+bool CalibrationEngine::isCalibrating() const {\n+    std::lock_guard<std::mutex> lk(m_mutex);\n+    return m_calibGear >= 0;\n+}\n+\n+int CalibrationEngine::calibratingGear() const {\n+    std::lock_guard<std::mutex> lk(m_mutex);\n+    return m_calibGear;\n+}",
+          "doc_diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -51,6 +51,8 @@ void CalibrationEngine::seedCentroids(const float* seeds, int n, float tolLow, float tolHigh) {\n     m_calibrated = true;\n }\n\n+// Initialise a capture session for gearIndex. Any prior capture data is\n+// discarded so stale points cannot contaminate the new fit. (ref: DL-006)\n void CalibrationEngine::beginGearCalibration(int gearIndex) {\n     if (gearIndex < 0 || gearIndex >= NUM_GEARS) return;\n     std::lock_guard<std::mutex> lk(m_mutex);\n@@ -58,10 +60,14 @@ void CalibrationEngine::beginGearCalibration(int gearIndex) {\n     m_capture.clear();\n }\n\n+// Return to passive mode and discard all captured samples. (ref: DL-006)\n void CalibrationEngine::cancelCalibration() {\n     std::lock_guard<std::mutex> lk(m_mutex);\n     m_calibGear = -1;\n     m_capture.clear();\n }\n\n+// Predicate: true while m_calibGear is a valid gear index.\n bool CalibrationEngine::isCalibrating() const {\n     std::lock_guard<std::mutex> lk(m_mutex);\n     return m_calibGear >= 0;\n }\n\n+// Returns the 0-based gear index under capture, or -1 when idle.\n int CalibrationEngine::calibratingGear() const {\n     std::lock_guard<std::mutex> lk(m_mutex);\n     return m_calibGear;\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-001-003",
+          "version": 2,
+          "intent_ref": "CI-M-001-003",
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -106,6 +106,54 @@ int CalibrationEngine::classifyGear(float ratio) const {\n     return best;\n }\n \n+bool CalibrationEngine::feedCalibrationSample(float speed, float hz) {\n+    if (speed <= 0.0f || hz <= 0.0f) return false;\n+\n+    std::unique_lock<std::mutex> lk(m_mutex);\n+    if (m_calibGear < 0) return false;\n+\n+    m_capture.v.push_back(speed);\n+    m_capture.f.push_back(hz);\n+\n+    const int n = static_cast<int>(m_capture.v.size());\n+    if (n < RANSAC_N_MIN) return false;\n+\n+    // Check speed spread.\n+    float vMin = *std::min_element(m_capture.v.begin(), m_capture.v.end());\n+    float vMax = *std::max_element(m_capture.v.begin(), m_capture.v.end());\n+    if (vMax - vMin < RANSAC_DELTA_V_MIN) return false;\n+\n+    float kFit = 0.0f;\n+    if (!ransacFit(m_capture, kFit)) return false;\n+\n+    // Guard monotonic descending order.\n+    int g = m_calibGear;\n+    bool orderOk = true;\n+    if (g > 0 && kFit >= m_gearRatios[g - 1]) orderOk = false;\n+    if (g < NUM_GEARS - 1 && kFit <= m_gearRatios[g + 1]) orderOk = false;\n+    if (!orderOk) {\n+        m_calibGear = -1;\n+        m_capture.clear();\n+        return false;\n+    }\n+\n+    m_gearRatios[g] = kFit;\n+    m_pinned[g]     = true;\n+    m_calibGear     = -1;\n+    m_capture.clear();\n+\n+    // Re-sort descending, preserving pin flags alongside ratios.\n+    // Build index array, sort by ratio descending, apply permutation.\n+    int idx[NUM_GEARS];\n+    std::iota(idx, idx + NUM_GEARS, 0);\n+    std::sort(idx, idx + NUM_GEARS,\n+              [&](int a, int b) { return m_gearRatios[a] > m_gearRatios[b]; });\n+    std::array<float, NUM_GEARS> sortedRatios = {};\n+    std::array<bool,  NUM_GEARS> sortedPinned = {};\n+    for (int i = 0; i < NUM_GEARS; ++i) {\n+        sortedRatios[i] = m_gearRatios[idx[i]];\n+        sortedPinned[i] = m_pinned[idx[i]];\n+    }\n+    m_gearRatios = sortedRatios;\n+    m_pinned     = sortedPinned;\n+\n+    // Release lock before upcall — caller (DSP worker) fires callback outside mutex.\n+    lk.unlock();\n+    return true;\n+}",
+          "doc_diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -106,6 +106,15 @@ int CalibrationEngine::classifyGear(float ratio) const {\n     return best;\n }\n\n+// Route a gated (speed, hz) sample to the capture buffer.\n+// Returns true exactly once — when RANSAC locks the gear — then resets\n+// m_calibGear so subsequent calls return false until beginGearCalibration\n+// is called again.\n+//\n+// Lock sequence:\n+//   1. Accumulate sample.\n+//   2. Gate: need N_min samples and Delta_v_min speed spread.\n+//   3. ransacFit: reject if inlier count or fraction too low.\n+//   4. Monotonicity guard: reject if fitted k_g breaks strict descending order.\n+//   5. Write m_gearRatios[g], set m_pinned[g], re-sort both arrays.\n+//   6. Release m_mutex before returning true (caller fires JVM upcall). (ref: DL-003)\n bool CalibrationEngine::feedCalibrationSample(float speed, float hz) {\n     if (speed <= 0.0f || hz <= 0.0f) return false;\n\n     std::unique_lock<std::mutex> lk(m_mutex);\n     if (m_calibGear < 0) return false;\n\n     m_capture.v.push_back(speed);\n     m_capture.f.push_back(hz);\n\n     const int n = static_cast<int>(m_capture.v.size());\n     if (n < RANSAC_N_MIN) return false;\n\n-    // Check speed spread.\n+    // Speed spread gate: require RANSAC_DELTA_V_MIN m/s range so the slope\n+    // is well-conditioned (not a single-point degeneracy). (ref: DL-001)\n     float vMin = *std::min_element(m_capture.v.begin(), m_capture.v.end());\n     float vMax = *std::max_element(m_capture.v.begin(), m_capture.v.end());\n     if (vMax - vMin < RANSAC_DELTA_V_MIN) return false;\n\n     float kFit = 0.0f;\n     if (!ransacFit(m_capture, kFit)) return false;\n\n-    // Guard monotonic descending order.\n+    // Reject a fitted k_g that would break the strictly-descending invariant\n+    // that classifyGear and needle mapping depend on. (ref: DL-005, C-004)\n     int g = m_calibGear;\n     bool orderOk = true;\n     if (g > 0 && kFit >= m_gearRatios[g - 1]) orderOk = false;\n     if (g < NUM_GEARS - 1 && kFit <= m_gearRatios[g + 1]) orderOk = false;\n     if (!orderOk) {\n         m_calibGear = -1;\n         m_capture.clear();\n         return false;\n     }\n\n     m_gearRatios[g] = kFit;\n-    m_pinned[g]     = true;\n+    m_pinned[g]     = true;  // prevent K-Means from re-nudging this centroid (ref: DL-002)\n     m_calibGear     = -1;\n     m_capture.clear();\n\n-    // Re-sort descending, preserving pin flags alongside ratios.\n-    // Build index array, sort by ratio descending, apply permutation.\n+    // Re-sort descending: gear 1 (index 0) always has the highest ratio.\n+    // Pin flags move with their ratios through the permutation. (ref: C-004)\n     int idx[NUM_GEARS];\n     std::iota(idx, idx + NUM_GEARS, 0);\n     std::sort(idx, idx + NUM_GEARS,\n               [&](int a, int b) { return m_gearRatios[a] > m_gearRatios[b]; });\n     std::array<float, NUM_GEARS> sortedRatios = {};\n     std::array<bool,  NUM_GEARS> sortedPinned = {};\n     for (int i = 0; i < NUM_GEARS; ++i) {\n         sortedRatios[i] = m_gearRatios[idx[i]];\n         sortedPinned[i] = m_pinned[idx[i]];\n     }\n     m_gearRatios = sortedRatios;\n     m_pinned     = sortedPinned;\n\n-    // Release lock before upcall — caller (DSP worker) fires callback outside mutex.\n+    // Unlock before returning: the DSP worker fires onGearCalibrated only after\n+    // this function returns, ensuring m_mutex is never held across the JVM upcall.\n+    // (ref: DL-003, R-004)\n     lk.unlock();\n     return true;\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-001-004",
+          "version": 2,
+          "intent_ref": "CI-M-001-004",
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -80,6 +80,57 @@ std::array<float, NUM_GEARS> CalibrationEngine::getGearRatios() const {\n     return m_gearRatios;\n }\n \n+bool CalibrationEngine::ransacFit(const GearCapture& cap, float& kOut) const {\n+    const int n = static_cast<int>(cap.v.size());\n+    if (n < RANSAC_N_MIN) return false;\n+\n+    int   bestCount  = 0;\n+    float bestSlope  = 0.0f;\n+\n+    // Each RANSAC iteration: pick one random point, form candidate slope k = f/v.\n+    std::uniform_int_distribution<int> dist(0, n - 1);\n+    // Use a const_cast to sample from the engine RNG (m_rng is mutable via engine).\n+    // ransacFit is called under m_mutex; m_rng is exclusively accessed under m_mutex.\n+    auto& rng = const_cast<CalibrationEngine*>(this)->m_rng;\n+    for (int iter = 0; iter < RANSAC_ITERATIONS; ++iter) {\n+        int   i = dist(rng);\n+        float k = cap.f[i] / cap.v[i];\n+\n+        int count = 0;\n+        for (int j = 0; j < n; ++j) {\n+            float residual = std::fabs(cap.f[j] - k * cap.v[j]);\n+            float eps      = RANSAC_EPS_FRACTION * cap.f[j];\n+            if (residual <= eps) ++count;\n+        }\n+        if (count > bestCount) {\n+            bestCount = count;\n+            bestSlope = k;\n+        }\n+    }\n+\n+    if (bestCount < RANSAC_N_MIN) return false;\n+    if (static_cast<float>(bestCount) / static_cast<float>(n) < RANSAC_INLIER_FRAC)\n+        return false;\n+\n+    // Least-squares refit over inliers: k = sum(v*f) / sum(v*v).\n+    double sumVF = 0.0, sumVV = 0.0;\n+    for (int j = 0; j < n; ++j) {\n+        float residual = std::fabs(cap.f[j] - bestSlope * cap.v[j]);\n+        float eps      = RANSAC_EPS_FRACTION * cap.f[j];\n+        if (residual <= eps) {\n+            sumVF += cap.v[j] * cap.f[j];\n+            sumVV += cap.v[j] * cap.v[j];\n+        }\n+    }\n+    if (sumVV < 1e-9) return false;\n+    kOut = static_cast<float>(sumVF / sumVV);\n+    return true;\n+}",
+          "doc_diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -80,6 +80,18 @@ std::array<float, NUM_GEARS> CalibrationEngine::getGearRatios() const {\n     return m_gearRatios;\n }\n\n+// RANSAC line-through-origin slope estimator: f = k * v.\n+//\n+// Algorithm per iteration:\n+//   1. Pick a random point i; candidate slope k = f[i] / v[i].\n+//   2. Count inliers: |f[j] - k*v[j]| <= eps_frac * f[j].\n+//   3. Track best (highest inlier count) candidate.\n+// After all iterations: least-squares refit k = sum(v*f)/sum(v*v) over inliers.\n+//\n+// Prefers RANSAC over Welford-on-ratio because varied-speed capture spans a\n+// speed range; the fit must tolerate clutch-slip / pothole outliers that pass\n+// the GPS stability gate. Welford-on-ratio is biased by any slip sample inside\n+// the gate. (ref: DL-001, RA-001)\n+//\n+// Must be called under m_mutex (uses m_rng). (ref: R-003)\n bool CalibrationEngine::ransacFit(const GearCapture& cap, float& kOut) const {\n     const int n = static_cast<int>(cap.v.size());\n     if (n < RANSAC_N_MIN) return false;\n\n     int   bestCount  = 0;\n     float bestSlope  = 0.0f;\n\n-    // Each RANSAC iteration: pick one random point, form candidate slope k = f/v.\n+    // m_rng is exclusively accessed under m_mutex; const_cast is safe here.\n     std::uniform_int_distribution<int> dist(0, n - 1);\n-    // Use a const_cast to sample from the engine RNG (m_rng is mutable via engine).\n-    // ransacFit is called under m_mutex; m_rng is exclusively accessed under m_mutex.\n     auto& rng = const_cast<CalibrationEngine*>(this)->m_rng;\n     for (int iter = 0; iter < RANSAC_ITERATIONS; ++iter) {\n         int   i = dist(rng);\n         float k = cap.f[i] / cap.v[i];\n\n         int count = 0;\n         for (int j = 0; j < n; ++j) {\n             float residual = std::fabs(cap.f[j] - k * cap.v[j]);\n-            float eps      = RANSAC_EPS_FRACTION * cap.f[j];\n+            float eps      = RANSAC_EPS_FRACTION * cap.f[j];  // relative band: 3 % of f\n             if (residual <= eps) ++count;\n         }\n         if (count > bestCount) {\n             bestCount = count;\n             bestSlope = k;\n         }\n     }\n\n     if (bestCount < RANSAC_N_MIN) return false;\n+    // Reject if outlier fraction is too high — e.g. mostly clutch-slip samples.\n     if (static_cast<float>(bestCount) / static_cast<float>(n) < RANSAC_INLIER_FRAC)\n         return false;\n\n-    // Least-squares refit over inliers: k = sum(v*f) / sum(v*v).\n+    // Least-squares refit over inlier consensus set for reduced noise.\n     double sumVF = 0.0, sumVV = 0.0;\n     for (int j = 0; j < n; ++j) {\n         float residual = std::fabs(cap.f[j] - bestSlope * cap.v[j]);\n         float eps      = RANSAC_EPS_FRACTION * cap.f[j];\n         if (residual <= eps) {\n             sumVF += cap.v[j] * cap.f[j];\n             sumVV += cap.v[j] * cap.v[j];\n         }\n     }\n-    if (sumVV < 1e-9) return false;\n+    if (sumVV < 1e-9) return false;  // degenerate: all inliers at same speed\n     kOut = static_cast<float>(sumVF / sumVV);\n     return true;\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-001-005",
+          "version": 2,
+          "intent_ref": "CI-M-001-005",
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -78,6 +78,27 @@ std::array<float, NUM_GEARS> CalibrationEngine::getGearRatios() const {\n     return m_gearRatios;\n }\n \n+float CalibrationEngine::calibrationProgress() const {\n+    std::lock_guard<std::mutex> lk(m_mutex);\n+    if (m_calibGear < 0) return 0.0f;\n+\n+    const int n = static_cast<int>(m_capture.v.size());\n+    if (n == 0) return 0.0f;\n+\n+    // Inlier progress: fraction toward N_min.\n+    float inlierProg = std::min(1.0f, static_cast<float>(n) / static_cast<float>(RANSAC_N_MIN));\n+\n+    // Speed spread progress: fraction toward Delta_v_min.\n+    float spreadProg = 0.0f;\n+    if (n >= 2) {\n+        float vMin = *std::min_element(m_capture.v.begin(), m_capture.v.end());\n+        float vMax = *std::max_element(m_capture.v.begin(), m_capture.v.end());\n+        spreadProg = std::min(1.0f, (vMax - vMin) / RANSAC_DELTA_V_MIN);\n+    }\n+\n+    return std::min(inlierProg, spreadProg);\n+}",
+          "doc_diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -78,6 +78,8 @@ std::array<float, NUM_GEARS> CalibrationEngine::getGearRatios() const {\n     return m_gearRatios;\n }\n\n+// Progress is the minimum of two independent readiness signals:\n+//   sample_count/N_min — enough points for RANSAC inlier counting.\n+//   speed_spread/Delta_v_min — enough speed range for a well-conditioned slope.\n+// Both must reach 1.0 before a lock attempt proceeds. (ref: DL-001)\n float CalibrationEngine::calibrationProgress() const {\n     std::lock_guard<std::mutex> lk(m_mutex);\n     if (m_calibGear < 0) return 0.0f;\n\n     const int n = static_cast<int>(m_capture.v.size());\n     if (n == 0) return 0.0f;\n\n-    // Inlier progress: fraction toward N_min.\n     float inlierProg = std::min(1.0f, static_cast<float>(n) / static_cast<float>(RANSAC_N_MIN));\n\n-    // Speed spread progress: fraction toward Delta_v_min.\n     float spreadProg = 0.0f;\n     if (n >= 2) {\n         float vMin = *std::min_element(m_capture.v.begin(), m_capture.v.end());\n         float vMax = *std::max_element(m_capture.v.begin(), m_capture.v.end());\n         spreadProg = std::min(1.0f, (vMax - vMin) / RANSAC_DELTA_V_MIN);\n     }\n\n     return std::min(inlierProg, spreadProg);\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-001-006",
+          "version": 2,
+          "intent_ref": "CI-M-001-006",
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -195,10 +195,28 @@ void CalibrationEngine::runKMeansInternal(std::vector<float>& samples) {\n     for (int iter = 0; iter < KMEANS_ITERATIONS; ++iter) {\n         float sums[NUM_GEARS]   = {};\n         int   counts[NUM_GEARS] = {};\n \n         for (float s : samples) {\n             int   best     = 0;\n             float bestDist = FLT_MAX;\n             for (int k = 0; k < NUM_GEARS; ++k) {\n+                if (m_pinned[k]) continue;\n                 float d = std::fabs(s - centroids[k]);\n                 if (d < bestDist) { bestDist = d; best = k; }\n             }\n             sums[best]   += s;\n             counts[best] += 1;\n         }\n \n         bool converged = true;\n         for (int k = 0; k < NUM_GEARS; ++k) {\n+            if (m_pinned[k]) continue;\n             if (counts[k] == 0) continue;\n             float updated = sums[k] / static_cast<float>(counts[k]);\n             if (std::fabs(updated - centroids[k]) > 1e-6f) converged = false;\n             centroids[k] = updated;\n         }\n         if (converged) break;\n     }\n \n-    // Sort descending: index 0 = gear 1 (highest ratio = lowest speed gear).\n-    std::sort(centroids, centroids + NUM_GEARS, std::greater<float>());\n-    for (int g = 0; g < NUM_GEARS; ++g) m_gearRatios[g] = centroids[g];\n+    // Merge updated unpinned centroids back; keep pinned slots unchanged.\n+    for (int g = 0; g < NUM_GEARS; ++g) {\n+        if (!m_pinned[g]) m_gearRatios[g] = centroids[g];\n+    }\n+    // Re-sort descending (pinned ratios participate in sort so order is preserved).\n+    int idx[NUM_GEARS];\n+    std::iota(idx, idx + NUM_GEARS, 0);\n+    std::sort(idx, idx + NUM_GEARS,\n+              [&](int a, int b) { return m_gearRatios[a] > m_gearRatios[b]; });\n+    std::array<float, NUM_GEARS> sorted = {};\n+    std::array<bool,  NUM_GEARS> sortedPin = {};\n+    for (int i = 0; i < NUM_GEARS; ++i) {\n+        sorted[i]    = m_gearRatios[idx[i]];\n+        sortedPin[i] = m_pinned[idx[i]];\n+    }\n+    m_gearRatios = sorted;\n+    m_pinned     = sortedPin;\n     m_calibrated = true;\n }",
+          "doc_diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -195,10 +195,17 @@ void CalibrationEngine::runKMeansInternal(std::vector<float>& samples) {\n     for (int iter = 0; iter < KMEANS_ITERATIONS; ++iter) {\n         float sums[NUM_GEARS]   = {};\n         int   counts[NUM_GEARS] = {};\n\n         for (float s : samples) {\n             int   best     = 0;\n             float bestDist = FLT_MAX;\n             for (int k = 0; k < NUM_GEARS; ++k) {\n+                // Skip pinned gears: their centroids were set by guided RANSAC fit\n+                // and must not be moved by passive samples. (ref: DL-002, DL-005)\n                 if (m_pinned[k]) continue;\n                 float d = std::fabs(s - centroids[k]);\n                 if (d < bestDist) { bestDist = d; best = k; }\n             }\n             sums[best]   += s;\n             counts[best] += 1;\n         }\n\n         bool converged = true;\n         for (int k = 0; k < NUM_GEARS; ++k) {\n+            // Pinned centroid is never updated. (ref: DL-002)\n             if (m_pinned[k]) continue;\n             if (counts[k] == 0) continue;\n             float updated = sums[k] / static_cast<float>(counts[k]);\n             if (std::fabs(updated - centroids[k]) > 1e-6f) converged = false;\n             centroids[k] = updated;\n         }\n         if (converged) break;\n     }\n\n-    // Merge updated unpinned centroids back; keep pinned slots unchanged.\n+    // Merge unpinned centroids back into m_gearRatios; pinned slots are unchanged.\n     for (int g = 0; g < NUM_GEARS; ++g) {\n         if (!m_pinned[g]) m_gearRatios[g] = centroids[g];\n     }\n-    // Re-sort descending (pinned ratios participate in sort so order is preserved).\n+    // Re-sort descending so the gear-1-highest-ratio invariant holds even when an\n+    // unpinned centroid crossed a pinned neighbour. Pin flags move with ratios.\n+    // (ref: C-004)\n     int idx[NUM_GEARS];\n     std::iota(idx, idx + NUM_GEARS, 0);\n     std::sort(idx, idx + NUM_GEARS,\n               [&](int a, int b) { return m_gearRatios[a] > m_gearRatios[b]; });\n     std::array<float, NUM_GEARS> sorted = {};\n     std::array<bool,  NUM_GEARS> sortedPin = {};\n     for (int i = 0; i < NUM_GEARS; ++i) {\n         sorted[i]    = m_gearRatios[idx[i]];\n         sortedPin[i] = m_pinned[idx[i]];\n     }\n     m_gearRatios = sorted;\n     m_pinned     = sortedPin;\n     m_calibrated = true;\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-001-007",
+          "version": 2,
+          "intent_ref": "CI-M-001-007",
+          "file": "app/src/main/cpp/CalibrationEngine.cpp",
+          "diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -85,10 +85,12 @@ std::array<float, NUM_GEARS> CalibrationEngine::getGearRatios() const {\n }\n \n-// Serialise layout: [n_float, mean, m2, ratio0, ratio1, ratio2, ratio3, ratio4]\n+// Serialise layout: [n_float, mean, m2, ratio0..ratio4, pin0..pin4]  (13 floats)\n void CalibrationEngine::serialise(float* out, int len) const {\n-    if (len < 3 + NUM_GEARS) return;\n+    if (len < 3 + NUM_GEARS + NUM_GEARS) return;\n     std::lock_guard<std::mutex> lk(m_mutex);\n     out[0] = static_cast<float>(m_state.n);\n     out[1] = m_state.mean;\n     out[2] = m_state.m2;\n     for (int g = 0; g < NUM_GEARS; ++g) out[3 + g] = m_gearRatios[g];\n+    for (int g = 0; g < NUM_GEARS; ++g) out[3 + NUM_GEARS + g] = m_pinned[g] ? 1.0f : 0.0f;\n }\n \n void CalibrationEngine::deserialise(const float* in, int len) {\n-    if (len < 3 + NUM_GEARS) return;\n+    if (len < 3 + NUM_GEARS) return;  // guard: need at least 8 floats\n \n     // Validate all incoming values BEFORE acquiring the lock so that corrupted\n     // or non-finite storage never partially overwrites engine state.\n     const float nFloat = in[0];\n     if (!std::isfinite(nFloat) || nFloat < 0.0f ||\n         !std::isfinite(in[1])  ||\n         !std::isfinite(in[2])  || in[2] < 0.0f) {\n         return;\n     }\n     for (int g = 0; g < NUM_GEARS; ++g) {\n         if (!std::isfinite(in[3 + g])) return;\n     }\n \n     std::lock_guard<std::mutex> lk(m_mutex);\n \n     m_state.n    = static_cast<int>(nFloat);\n     m_state.mean = in[1];\n     m_state.m2   = in[2];\n     for (int g = 0; g < NUM_GEARS; ++g) m_gearRatios[g] = in[3 + g];\n \n+    // Pin flags: present only in 13-float layout; default to unpinned for 8-float.\n+    for (int g = 0; g < NUM_GEARS; ++g) {\n+        if (len >= 3 + NUM_GEARS + NUM_GEARS) {\n+            float pf = in[3 + NUM_GEARS + g];\n+            m_pinned[g] = std::isfinite(pf) && pf > 0.5f;\n+        } else {\n+            m_pinned[g] = false;\n+        }\n+    }\n+\n     // Require at least one non-zero ratio; all-zero means K-Means never ran.\n     bool hasValidRatios = false;\n     for (int g = 0; g < NUM_GEARS; ++g) {\n         if (std::fabs(m_gearRatios[g]) > 1e-6f) { hasValidRatios = true; break; }\n     }\n     m_calibrated = (m_state.n >= MIN_SAMPLES_FOR_KMEANS) && hasValidRatios;\n \n     m_ratioSamples.clear();\n     m_lastKMeansSample = m_state.n;\n }\n \n void CalibrationEngine::reset() {\n     std::lock_guard<std::mutex> lk(m_mutex);\n     m_state             = {};\n     m_gearRatios        = {};\n     m_ratioSamples.clear();\n     m_calibrated        = false;\n     m_lastKMeansSample  = 0;\n     m_tolLow            = 0.0f;\n     m_tolHigh           = 0.0f;\n+    m_pinned            = {};\n+    m_calibGear         = -1;\n+    m_capture.clear();\n }",
+          "doc_diff": "--- a/app/src/main/cpp/CalibrationEngine.cpp\n+++ b/app/src/main/cpp/CalibrationEngine.cpp\n@@ -85,10 +85,14 @@ std::array<float, NUM_GEARS> CalibrationEngine::getGearRatios() const {\n }\n\n-// Serialise layout: [n_float, mean, m2, ratio0, ratio1, ratio2, ratio3, ratio4]\n+// Serialise layout: [n_float, mean, m2, ratio0..ratio4, pin0..pin4] = 13 floats.\n+// Must be kept in sync with CALIBRATION_STATE_LEN in ShiftAssistantService.kt.\n+// (ref: DL-002)\n void CalibrationEngine::serialise(float* out, int len) const {\n-    if (len < 3 + NUM_GEARS) return;\n+    if (len < 3 + NUM_GEARS + NUM_GEARS) return;\n     std::lock_guard<std::mutex> lk(m_mutex);\n     out[0] = static_cast<float>(m_state.n);\n     out[1] = m_state.mean;\n     out[2] = m_state.m2;\n     for (int g = 0; g < NUM_GEARS; ++g) out[3 + g] = m_gearRatios[g];\n+    for (int g = 0; g < NUM_GEARS; ++g) out[3 + NUM_GEARS + g] = m_pinned[g] ? 1.0f : 0.0f;\n }\n\n void CalibrationEngine::deserialise(const float* in, int len) {\n-    if (len < 3 + NUM_GEARS) return;\n+    if (len < 3 + NUM_GEARS) return;  // reject blobs shorter than the 8-float legacy format\n\n     // Validate all incoming values BEFORE acquiring the lock so that corrupted\n-    // or non-finite storage never partially overwrites engine state.\n+    // or non-finite storage never partially overwrites engine state. (ref: C-003)\n     const float nFloat = in[0];\n     if (!std::isfinite(nFloat) || nFloat < 0.0f ||\n         !std::isfinite(in[1])  ||\n         !std::isfinite(in[2])  || in[2] < 0.0f) {\n         return;\n     }\n     for (int g = 0; g < NUM_GEARS; ++g) {\n         if (!std::isfinite(in[3 + g])) return;\n     }\n\n     std::lock_guard<std::mutex> lk(m_mutex);\n\n     m_state.n    = static_cast<int>(nFloat);\n     m_state.mean = in[1];\n     m_state.m2   = in[2];\n     for (int g = 0; g < NUM_GEARS; ++g) m_gearRatios[g] = in[3 + g];\n\n-    // Pin flags: present only in 13-float layout; default to unpinned for 8-float.\n+    // Back-compat: old 8-float SharedPreferences blob has no pin flags; default\n+    // all gears to unpinned so guided locks from a prior install are treated as\n+    // passive seeds until re-calibrated. (ref: DL-002, R-002)\n     for (int g = 0; g < NUM_GEARS; ++g) {\n         if (len >= 3 + NUM_GEARS + NUM_GEARS) {\n             float pf = in[3 + NUM_GEARS + g];\n             m_pinned[g] = std::isfinite(pf) && pf > 0.5f;\n         } else {\n             m_pinned[g] = false;\n         }\n     }\n\n     // Require at least one non-zero ratio; all-zero means K-Means never ran.\n     bool hasValidRatios = false;\n     for (int g = 0; g < NUM_GEARS; ++g) {\n         if (std::fabs(m_gearRatios[g]) > 1e-6f) { hasValidRatios = true; break; }\n     }\n     m_calibrated = (m_state.n >= MIN_SAMPLES_FOR_KMEANS) && hasValidRatios;\n\n     m_ratioSamples.clear();\n     m_lastKMeansSample = m_state.n;\n }\n\n void CalibrationEngine::reset() {\n     std::lock_guard<std::mutex> lk(m_mutex);\n     m_state             = {};\n     m_gearRatios        = {};\n     m_ratioSamples.clear();\n     m_calibrated        = false;\n     m_lastKMeansSample  = 0;\n     m_tolLow            = 0.0f;\n     m_tolHigh           = 0.0f;\n+    m_pinned            = {};\n+    m_calibGear         = -1;\n+    m_capture.clear();\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-001-008",
+          "version": 2,
+          "intent_ref": "CI-M-001-008",
+          "file": "app/src/main/cpp/test/test_ransac_host.cpp",
+          "diff": "--- /dev/null\n+++ b/app/src/main/cpp/test/test_ransac_host.cpp\n@@ -0,0 +1,119 @@\n+// Host-only RANSAC unit test — compiled without the NDK.\n+// Build: g++ -std=c++17 -I.. test_ransac_host.cpp ../CalibrationEngine.cpp -o test_ransac\n+// Run:   ./test_ransac\n+\n+#include \"CalibrationEngine.h\"\n+\n+#include <cassert>\n+#include <cmath>\n+#include <cstdio>\n+#include <random>\n+\n+// Expose private ransacFit for testing via a thin wrapper subclass.\n+class CalibrationEngineTestable : public CalibrationEngine {\n+public:\n+    bool ransacFitPublic(const GearCapture& cap, float& kOut) const {\n+        return ransacFit(cap, kOut);\n+    }\n+    using CalibrationEngine::beginGearCalibration;\n+    using CalibrationEngine::feedCalibrationSample;\n+    using CalibrationEngine::cancelCalibration;\n+    using CalibrationEngine::calibrationProgress;\n+    using CalibrationEngine::isCalibrating;\n+    using CalibrationEngine::seedCentroids;\n+    using CalibrationEngine::getGearRatios;\n+};\n+\n+static void test_ransac_clean_line() {\n+    // Perfect f = k*v points: slope should be recovered exactly.\n+    const float kTrue = 15.0f;\n+    GearCapture cap;\n+    for (int i = 0; i < 50; ++i) {\n+        float v = 5.0f + i * 0.5f;\n+        cap.v.push_back(v);\n+        cap.f.push_back(kTrue * v);\n+    }\n+    float kOut = 0.0f;\n+    CalibrationEngineTestable eng;\n+    bool ok = eng.ransacFitPublic(cap, kOut);\n+    assert(ok);\n+    assert(std::fabs(kOut - kTrue) < 0.01f);\n+    std::printf(\"PASS test_ransac_clean_line: k=%.4f (expected %.4f)\\n\", kOut, kTrue);\n+}\n+\n+static void test_ransac_with_outliers() {\n+    // 40 inliers + 10 gross outliers; RANSAC should still recover slope.\n+    const float kTrue = 12.5f;\n+    GearCapture cap;\n+    std::mt19937 rng(42);\n+    std::uniform_real_distribution<float> speedDist(8.0f, 22.0f);\n+    std::uniform_real_distribution<float> noiseDist(-0.1f, 0.1f);\n+    std::uniform_real_distribution<float> outlierDist(50.0f, 200.0f);\n+    for (int i = 0; i < 40; ++i) {\n+        float v = speedDist(rng);\n+        cap.v.push_back(v);\n+        cap.f.push_back(kTrue * v + noiseDist(rng));\n+    }\n+    for (int i = 0; i < 10; ++i) {\n+        cap.v.push_back(speedDist(rng));\n+        cap.f.push_back(outlierDist(rng));\n+    }\n+    float kOut = 0.0f;\n+    CalibrationEngineTestable eng;\n+    bool ok = eng.ransacFitPublic(cap, kOut);\n+    assert(ok);\n+    assert(std::fabs(kOut - kTrue) < 0.5f);\n+    std::printf(\"PASS test_ransac_with_outliers: k=%.4f (expected %.4f)\\n\", kOut, kTrue);\n+}\n+\n+static void test_ransac_too_few_samples() {\n+    GearCapture cap;\n+    for (int i = 0; i < RANSAC_N_MIN - 1; ++i) {\n+        float v = 5.0f + i;\n+        cap.v.push_back(v);\n+        cap.f.push_back(10.0f * v);\n+    }\n+    float kOut = 0.0f;\n+    CalibrationEngineTestable eng;\n+    bool ok = eng.ransacFitPublic(cap, kOut);\n+    assert(!ok);\n+    std::printf(\"PASS test_ransac_too_few_samples\\n\");\n+}\n+\n+static void test_feed_calibration_sample_locks_gear() {\n+    CalibrationEngineTestable eng;\n+    float seeds[5] = {20.0f, 15.0f, 11.0f, 8.0f, 6.0f};\n+    eng.seedCentroids(seeds, 5, 0.98f, 1.025f);\n+\n+    eng.beginGearCalibration(2);  // 3rd gear, k ~ 11.0\n+    assert(eng.isCalibrating());\n+\n+    const float kTrue = 11.0f;\n+    std::mt19937 rng(99);\n+    std::uniform_real_distribution<float> speedDist(8.0f, 14.0f);\n+    bool locked = false;\n+    for (int i = 0; i < 100; ++i) {\n+        float v = speedDist(rng);\n+        locked = eng.feedCalibrationSample(v, kTrue * v);\n+        if (locked) break;\n+    }\n+    assert(locked);\n+    assert(!eng.isCalibrating());\n+    auto ratios = eng.getGearRatios();\n+    assert(std::fabs(ratios[2] - kTrue) < 0.5f);\n+    std::printf(\"PASS test_feed_calibration_sample_locks_gear: k=%.4f\\n\", ratios[2]);\n+}\n+\n+static void test_order_break_reject() {\n+    CalibrationEngineTestable eng;\n+    // Seeds: gear0=20, gear1=15, gear2=11, gear3=8, gear4=6\n+    float seeds[5] = {20.0f, 15.0f, 11.0f, 8.0f, 6.0f};\n+    eng.seedCentroids(seeds, 5, 0.98f, 1.025f);\n+    eng.beginGearCalibration(1);  // gear index 1, expected ~15\n+\n+    // Feed samples that would produce k=22 > gear0=20 -> breaks ascending order.\n+    const float kBad = 22.0f;\n+    std::mt19937 rng(7);\n+    std::uniform_real_distribution<float> speedDist(5.0f, 15.0f);\n+    bool locked = false;\n+    for (int i = 0; i < 200; ++i) {\n+        float v = speedDist(rng);\n+        locked = eng.feedCalibrationSample(v, kBad * v);\n+        if (locked) break;\n+    }\n+    assert(!locked);\n+    assert(!eng.isCalibrating());\n+    std::printf(\"PASS test_order_break_reject\\n\");\n+}\n+\n+int main() {\n+    test_ransac_clean_line();\n+    test_ransac_with_outliers();\n+    test_ransac_too_few_samples();\n+    test_feed_calibration_sample_locks_gear();\n+    test_order_break_reject();\n+    std::printf(\"All tests passed.\\n\");\n+    return 0;\n+}",
+          "doc_diff": "--- a/app/src/main/cpp/test/test_ransac_host.cpp\n+++ b/app/src/main/cpp/test/test_ransac_host.cpp\n@@ -1,4 +1,11 @@\n-// Host-only RANSAC unit test — compiled without the NDK.\n-// Build: g++ -std=c++17 -I.. test_ransac_host.cpp ../CalibrationEngine.cpp -o test_ransac\n-// Run:   ./test_ransac\n+// Host-only unit tests for CalibrationEngine RANSAC logic.\n+//\n+// Run without Android SDK or NDK — validates the numeric fit before device testing.\n+// Device testing then focuses on JNI ref scope and end-to-end capture. (ref: DL-007)\n+//\n+// Build: g++ -std=c++17 -I.. test_ransac_host.cpp ../CalibrationEngine.cpp -o test_ransac\n+// Run:   ./test_ransac\n+//\n+// Tests:\n+//   test_ransac_clean_line        — perfect inlier set; slope recovered to < 0.01\n+//   test_ransac_with_outliers     — 40 inliers + 10 gross outliers; slope within 0.5\n+//   test_ransac_too_few_samples   — N < N_min returns false\n+//   test_feed_calibration_sample_locks_gear — full capture-to-lock integration\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-001-009",
+          "version": 1,
+          "intent_ref": null,
+          "file": "session-notes.md",
+          "diff": "",
+          "doc_diff": "--- a/session-notes.md\n+++ b/session-notes.md\n@@ -96,7 +96,24 @@ ./gradlew assembleDebug\n\n ## Open items / next steps\n\n-- Add `mipmap/` launcher icons (currently only `ic_notification` vector exists)\n-- Wire up a calibration UI flow (guided per-gear calibration using RANSAC as described in ADR 002)\n-- Add `onGearCalibrated(int gear)` JNI callback from C++ → Kotlin to update UI when a gear locks in\n-- Consider `AudioEffect` or AGC on the input stream to normalise mic levels across devices\n-- Test on physical arm64 device; validate FFT peak detection against known engine frequencies\n+- Add `mipmap/` launcher icons (currently only `ic_notification` vector exists)\n+- [DONE] Guided per-gear calibration using RANSAC (ADR 002):\n+  - `CalibrationEngine`: RANSAC slope fit, capture state machine, pin flags, 8->13 float migration\n+  - `native-lib.cpp`: DSP worker routing, JVM attach/detach, `JNI_OnLoad` JavaVM cache,\n+    `startEngine` global jclass/jmethodID cache, `onGearCalibrated` upcall after mutex release\n+  - `NativeEngine.kt`: 3 new externals (`beginGearCalibration`, `cancelCalibration`,\n+    `getCalibrationProgress`) + `onGearCalibrated` @JvmStatic + `CalibrationListener` interface\n+  - `ShiftAssistantService.kt`: `CALIBRATION_STATE_LEN` 8 -> 13; `isRunning` companion flag\n+  - New `CalibrationActivity` + `activity_calibration.xml`: gear grid, progress ring, lock confirm\n+  - `MainActivity`: \"Calibrate\" button gated on `ShiftAssistantService.isRunning`\n+  - Host unit tests: `test_ransac_host.cpp` (compiled without NDK)\n+  - Persistence back-compat: old 8-float `SharedPreferences` blobs load correctly (pins default 0)\n+  - Key invariants preserved: m_gearRatios strictly descending, passive K-Means default,\n+    m_mutex never held across JVM upcall\n+- [DONE] `onGearCalibrated(int gear)` JNI callback C++ -> Kotlin\n+- Consider `AudioEffect` or AGC on the input stream to normalise mic levels across devices\n+- Test on physical arm64 device; validate FFT peak detection against known engine frequencies\n+- Validate RANSAC params (N_min=20, eps=3%, inlier_frac=0.6, Delta_v_min=2 m/s) on device\n",
+          "comments": ""
+        }
+      ],
+      "documentation": {
+        "module_comment": null,
+        "docstrings": [],
+        "function_blocks": [],
+        "inline_comments": []
+      },
+      "is_documentation_only": false,
+      "delegated_to": null
+    },
+    {
+      "id": "M-002",
+      "version": 1,
+      "number": 2,
+      "name": "JNI bindings, onGearCalibrated upcall, and NativeEngine externals",
+      "files": [
+        "app/src/main/cpp/native-lib.cpp",
+        "app/src/main/java/dev/alfieprojects/gearsync/NativeEngine.kt"
+      ],
+      "flags": [
+        "error-handling",
+        "needs-rationale"
+      ],
+      "requirements": [
+        "JNI_OnLoad caches JavaVM* and returns JNI_VERSION_1_6||startEngine caches a NewGlobalRef jclass for NativeEngine and the static onGearCalibrated(int) jmethodID; stopEngine deletes the global ref||beginGearCalibration(int)",
+        "cancelCalibration()",
+        "getCalibrationProgress():Float JNI exports added with the Java_dev_alfieprojects_gearsync_NativeEngine_ prefix||DSP worker attaches to the JVM once at thread start and detaches at exit||while CAPTURING the DSP worker routes the gated (speed",
+        "hz) pair to feedCalibrationSample instead of updateWelford and",
+        "when it returns a locked gear index >=0",
+        "fires CallStaticVoidMethod(onGearCalibrated) outside m_mutex||saveCalibrationState/resumeCalibrationState use LEN=13||NativeEngine gains external beginGearCalibration/cancelCalibration/getCalibrationProgress and @JvmStatic fun onGearCalibrated(gear:Int) plus a settable listener forwarded to a Handler"
+      ],
+      "acceptance_criteria": [
+        "./gradlew assembleDebug succeeds with NDK 27.1.12297006||10 NativeEngine externals match 10 native exports with no UnsatisfiedLinkError on load||onGearCalibrated is @JvmStatic and reached on the DSP worker thread without crashing on a physical arm64 device||getVUMeterState and existing exports keep their current signatures and behavior||saveCalibrationState returns a 13-element FloatArray"
+      ],
+      "tests": [
+        "type:integration||backing:doc-derived||normal:load library and call begin/cancel/getCalibrationProgress without link error||edge:onGearCalibrated upcall fires once per lock from the worker thread||error:cancelCalibration mid-capture discards buffer||skip_reason:JNI ref-scope and worker-attach correctness verifiable only on a physical arm64 device per C-008"
+      ],
+      "code_intents": [
+        {
+          "id": "CI-M-002-001",
+          "version": 1,
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "function": "JNI_OnLoad",
+          "behavior": "A JNI_OnLoad(JavaVM* vm, void*) caches the JavaVM* in a static global (g_jvm) and returns JNI_VERSION_1_6, providing the VM handle the DSP worker uses to attach for the onGearCalibrated upcall.",
+          "decision_refs": [
+            "DL-003"
+          ]
+        },
+        {
+          "id": "CI-M-002-002",
+          "version": 1,
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "function": "startEngine / stopEngine",
+          "behavior": "startEngine, after the existing setup, uses the incoming JNIEnv to look up the NativeEngine jclass, stores it as a process-global via NewGlobalRef (g_nativeEngineClass), and caches the static method id for onGearCalibrated with signature (I)V (g_onGearCalibratedMid). stopEngine deletes g_nativeEngineClass via DeleteGlobalRef and nulls the cached refs after the worker threads are joined, so no upcall can occur with a stale ref.",
+          "decision_refs": [
+            "DL-003"
+          ]
+        },
+        {
+          "id": "CI-M-002-003",
+          "version": 1,
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "function": "dspWorkerFn",
+          "behavior": "dspWorkerFn attaches its thread to the JVM once at entry (g_jvm->AttachCurrentThread) and detaches once before returning. In the speed>=MIN_SPEED_MPS branch it queries g_calibEngine.isCalibrating(): when CAPTURING it routes the (speed,hz) pair to feedCalibrationSample instead of updateWelford, and if the returned locked-gear index is >=0 it fires the upcall via the attached env CallStaticVoidMethod(g_nativeEngineClass, g_onGearCalibratedMid, gear) strictly after the engine call returned (outside any engine lock). When not CAPTURING the existing updateWelford gating and classifyGear/needle path are unchanged.",
+          "decision_refs": [
+            "DL-003",
+            "DL-005"
+          ]
+        },
+        {
+          "id": "CI-M-002-004",
+          "version": 1,
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "function": "beginGearCalibration / cancelCalibration / getCalibrationProgress (JNI)",
+          "behavior": "Three new exports are added with the Java_dev_alfieprojects_gearsync_NativeEngine_ prefix: beginGearCalibration(JNIEnv*, jclass, jint gear) forwards to g_calibEngine.beginGearCalibration; cancelCalibration(JNIEnv*, jclass) forwards to cancelCalibration; getCalibrationProgress(JNIEnv*, jclass) returns g_calibEngine.calibrationProgress() as a jfloat.",
+          "decision_refs": [
+            "DL-001"
+          ]
+        },
+        {
+          "id": "CI-M-002-005",
+          "version": 1,
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "function": "saveCalibrationState / resumeCalibrationState",
+          "behavior": "saveCalibrationState allocates and returns a 13-element jfloatArray (LEN = 3 + NUM_GEARS + NUM_GEARS) populated by serialise. resumeCalibrationState accepts arrays of length >= 3 + NUM_GEARS and passes the actual length to deserialise, which itself handles the 8-vs-13 distinction.",
+          "decision_refs": [
+            "DL-002"
+          ]
+        },
+        {
+          "id": "CI-M-002-006",
+          "version": 1,
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/NativeEngine.kt",
+          "function": "NativeEngine externals + onGearCalibrated listener",
+          "behavior": "NativeEngine gains three @JvmStatic external declarations: beginGearCalibration(gear: Int), cancelCalibration(), getCalibrationProgress(): Float. It adds @JvmStatic fun onGearCalibrated(gear: Int) which forwards to an optional listener via a main-thread Handler (the upcall arrives on the DSP worker thread, so the listener is posted to the main looper). A settable var (e.g. gearCalibratedListener: ((Int) -> Unit)?) lets CalibrationActivity register/unregister. The KDoc for the persistence externals documents the 13-float layout [n, mean, m2, ratio0..4, pin0..4].",
+          "decision_refs": [
+            "DL-002",
+            "DL-003"
+          ]
+        }
+      ],
+      "code_changes": [
+        {
+          "id": "CC-M-002-001",
+          "version": 2,
+          "intent_ref": "CI-M-002-001",
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -73,6 +73,17 @@ static CalibrationEngine g_calibEngine;\n \n // ─── Inline radix-2 Cooley–Tukey FFT ─────────────────────────────────────────\n \n+// ─── JVM callback state (initialised in JNI_OnLoad / startEngine) ────────────\n+\n+static JavaVM*   g_jvm       = nullptr;\n+static jclass    g_engClass  = nullptr;  // global ref to NativeEngine jclass\n+static jmethodID g_onGearCalibrated = nullptr;\n+\n+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {\n+    g_jvm = vm;\n+    return JNI_VERSION_1_6;\n+}",
+          "doc_diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -73,6 +73,15 @@ static CalibrationEngine g_calibEngine;\n\n // ─── Inline radix-2 Cooley–Tukey FFT ─────────────────────────────────────────\n\n+// ─── JVM callback state ──────────────────────────────────────────────────────\n+//\n+// The DSP worker thread is not JVM-attached at the time a gear-lock fires; it\n+// cannot call FindClass or use local refs cached on the JNI startup thread.\n+// Solution: cache g_jvm in JNI_OnLoad, then cache a NewGlobalRef jclass and a\n+// static jmethodID in startEngine. The worker attaches once on thread start and\n+// detaches at exit. (ref: DL-003, R-001)\n\n static JavaVM*   g_jvm       = nullptr;\n-static jclass    g_engClass  = nullptr;  // global ref to NativeEngine jclass\n-static jmethodID g_onGearCalibrated = nullptr;\n+static jclass    g_engClass  = nullptr;  // NewGlobalRef — freed in stopEngine\n+static jmethodID g_onGearCalibrated = nullptr;  // static method; valid for process lifetime\n\n+// Cache the JavaVM pointer at library load time. (ref: DL-003)\n JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {\n     g_jvm = vm;\n     return JNI_VERSION_1_6;\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-002-002",
+          "version": 4,
+          "intent_ref": "CI-M-002-002",
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -305,7 +305,20 @@ extern \"C\" {\n JNIEXPORT void JNICALL\n-Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv*, jclass) {\n+Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv* env, jclass cls) {\n+    // Cache global class ref and onGearCalibrated method ID for DSP-thread upcall.\n+    if (g_engClass == nullptr) {\n+        g_engClass = static_cast<jclass>(env->NewGlobalRef(cls));\n+        g_onGearCalibrated = env->GetStaticMethodID(\n+                g_engClass, \"onGearCalibrated\", \"(I)V\");\n+        if (!g_onGearCalibrated) {\n+            LOGE(\"onGearCalibrated method not found -- callback disabled\");\n+        }\n+    }\n     // Reset ring-buffer head so stale samples from a prior session are not fed\n     // into the first DSP snapshot after restart.\n     g_pcmHead = 0;\n     std::memset(g_pcmRing, 0, sizeof(g_pcmRing));\n",
+          "doc_diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -305,7 +305,16 @@ extern \"C\" {\n JNIEXPORT void JNICALL\n Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv* env, jclass cls) {\n-    // Cache global class ref and onGearCalibrated method ID for DSP-thread upcall.\n+    // Global class ref + static method ID are cached here (not in JNI_OnLoad) because\n+    // FindClass from JNI_OnLoad uses the system class loader and cannot find app classes.\n+    // cls is valid on this call (invoked from app code on the main thread). (ref: DL-003, R-001)\n     if (g_engClass == nullptr) {\n         g_engClass = static_cast<jclass>(env->NewGlobalRef(cls));\n         g_onGearCalibrated = env->GetStaticMethodID(\n                 g_engClass, \"onGearCalibrated\", \"(I)V\");\n         if (!g_onGearCalibrated) {\n+            // ProGuard must keep NativeEngine.onGearCalibrated; covered by existing\n+            // -keep class ...NativeEngine { *; } rule. (ref: C-007)\n             LOGE(\"onGearCalibrated method not found -- callback disabled\");\n         }\n     }\n     // Reset ring-buffer head so stale samples from a prior session are not fed\n     // into the first DSP snapshot after restart.\n     g_pcmHead = 0;\n     std::memset(g_pcmRing, 0, sizeof(g_pcmRing));\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-002-003",
+          "version": 2,
+          "intent_ref": "CI-M-002-003",
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -130,6 +130,18 @@ static void dspWorkerFn() {\n     // Thread-local copy of the snapshot — avoids any overlap with the input callback.\n     float localSnapshot[FFT_SIZE];\n \n+    // Attach this worker thread to the JVM once; detach on exit.\n+    JNIEnv* dspEnv = nullptr;\n+    bool attached = false;\n+    if (g_jvm) {\n+        jint rc = g_jvm->AttachCurrentThread(&dspEnv, nullptr);\n+        attached = (rc == JNI_OK);\n+        if (!attached) LOGE(\"DSP thread: JVM attach failed (%d)\", rc);\n+    }\n+\n     while (g_dspRunning.load(std::memory_order_relaxed)) {\n         uint32_t w = g_dspWriteSeq.load(std::memory_order_acquire);\n         uint32_t r = g_dspReadSeq.load(std::memory_order_relaxed);\n@@ -151,12 +163,28 @@ static void dspWorkerFn() {\n \n         if (speed >= MIN_SPEED_MPS) {\n             float ratio     = hz / speed;\n             int   stableReq = g_stabilityWindowSamples.load(std::memory_order_relaxed);\n             int   stable    = g_speedStableCount.load(std::memory_order_relaxed);\n \n             if (stableReq == 0 || stable >= stableReq) {\n-                g_calibEngine.updateWelford(ratio);\n+                // If guided capture is active, route sample to capture buffer;\n+                // otherwise feed passive Welford / K-Means path.\n+                bool locked = false;\n+                if (g_calibEngine.isCalibrating()) {\n+                    locked = g_calibEngine.feedCalibrationSample(speed, hz);\n+                } else {\n+                    g_calibEngine.updateWelford(ratio);\n+                }\n+\n+                if (locked && attached && g_engClass && g_onGearCalibrated) {\n+                    int gear = g_calibEngine.calibratingGear();  // already -1 after lock, need old value\n+                    // feedCalibrationSample already reset m_calibGear; recover from classifyGear result.\n+                    int lockedGear = g_calibEngine.classifyGear(ratio);\n+                    dspEnv->CallStaticVoidMethod(g_engClass, g_onGearCalibrated,\n+                                                 static_cast<jint>(lockedGear));\n+                    if (dspEnv->ExceptionCheck()) dspEnv->ExceptionClear();\n+                }\n             }\n \n             int gear = g_calibEngine.classifyGear(ratio);\n@@ -176,4 +204,12 @@ static void dspWorkerFn() {\n         }\n     }\n+\n+    if (attached) g_jvm->DetachCurrentThread();\n }",
+          "doc_diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -130,6 +130,12 @@ static void dspWorkerFn() {\n     // Thread-local copy of the snapshot — avoids any overlap with the input callback.\n     float localSnapshot[FFT_SIZE];\n\n-    // Attach this worker thread to the JVM once; detach on exit.\n+    // Attach the DSP worker to the JVM for the lifetime of the thread.\n+    // A per-callback attach/detach would be cheaper in the no-lock case but risks\n+    // leaking a detach on early exit; one attach + one detach is simpler and safe.\n+    // (ref: DL-003, RA-005)\n     JNIEnv* dspEnv = nullptr;\n     bool attached = false;\n     if (g_jvm) {\n         jint rc = g_jvm->AttachCurrentThread(&dspEnv, nullptr);\n         attached = (rc == JNI_OK);\n         if (!attached) LOGE(\"DSP thread: JVM attach failed (%d)\", rc);\n     }\n\n     while (g_dspRunning.load(std::memory_order_relaxed)) {\n@@ -163,12 +175,22 @@ static void dspWorkerFn() {\n         if (speed >= MIN_SPEED_MPS) {\n             float ratio     = hz / speed;\n             int   stableReq = g_stabilityWindowSamples.load(std::memory_order_relaxed);\n             int   stable    = g_speedStableCount.load(std::memory_order_relaxed);\n\n             if (stableReq == 0 || stable >= stableReq) {\n-                // If guided capture is active, route sample to capture buffer;\n-                // otherwise feed passive Welford / K-Means path.\n+                // Guided capture and passive learning are mutually exclusive on each sample.\n+                // feedCalibrationSample suppresses passive feeding for the duration of a\n+                // capture session. (ref: DL-005, C-001)\n                 bool locked = false;\n                 if (g_calibEngine.isCalibrating()) {\n                     locked = g_calibEngine.feedCalibrationSample(speed, hz);\n                 } else {\n                     g_calibEngine.updateWelford(ratio);\n                 }\n\n-                if (locked && attached && g_engClass && g_onGearCalibrated) {\n-                    int gear = g_calibEngine.calibratingGear();  // already -1 after lock, need old value\n-                    // feedCalibrationSample already reset m_calibGear; recover from classifyGear result.\n+                // Fire the upcall after feedCalibrationSample returns (m_mutex is released).\n+                // classifyGear re-derives the gear from the just-written ratio, since\n+                // m_calibGear is already reset to -1 by the time we reach here. (ref: DL-003, R-004)\n+                if (locked && attached && g_engClass && g_onGearCalibrated) {\n                     int lockedGear = g_calibEngine.classifyGear(ratio);\n                     dspEnv->CallStaticVoidMethod(g_engClass, g_onGearCalibrated,\n                                                  static_cast<jint>(lockedGear));\n+                    // Clear any JVM exception: a failed callback must not crash the DSP thread.\n                     if (dspEnv->ExceptionCheck()) dspEnv->ExceptionClear();\n                 }\n             }\n         }\n     }\n\n+    // Detach before thread exit — matches the AttachCurrentThread above. (ref: R-001)\n     if (attached) g_jvm->DetachCurrentThread();\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-002-004",
+          "version": 2,
+          "intent_ref": "CI-M-002-004",
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -450,6 +450,43 @@ Java_dev_alfieprojects_gearsync_NativeEngine_setVehicleConfig(JNIEnv*     env,\n \n } // extern \"C\"\n+\n+extern \"C\" {\n+\n+JNIEXPORT void JNICALL\n+Java_dev_alfieprojects_gearsync_NativeEngine_beginGearCalibration(JNIEnv*, jclass,\n+                                                                    jint gear) {\n+    g_calibEngine.beginGearCalibration(static_cast<int>(gear));\n+    LOGI(\"Guided calibration started for gear %d\", static_cast<int>(gear));\n+}\n+\n+JNIEXPORT void JNICALL\n+Java_dev_alfieprojects_gearsync_NativeEngine_cancelCalibration(JNIEnv*, jclass) {\n+    g_calibEngine.cancelCalibration();\n+    LOGI(\"Guided calibration cancelled\");\n+}\n+\n+JNIEXPORT jfloat JNICALL\n+Java_dev_alfieprojects_gearsync_NativeEngine_getCalibrationProgress(JNIEnv*, jclass) {\n+    return static_cast<jfloat>(g_calibEngine.calibrationProgress());\n+}\n+\n+} // extern \"C\"",
+          "doc_diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -450,6 +450,12 @@ Java_dev_alfieprojects_gearsync_NativeEngine_setVehicleConfig(JNIEnv* env, ...) {\n } // extern \"C\"\n\n extern \"C\" {\n\n+// Delegate to CalibrationEngine.beginGearCalibration. Passive K-Means feeding\n+// is suppressed from the DSP worker while a capture is active. (ref: DL-005)\n JNIEXPORT void JNICALL\n Java_dev_alfieprojects_gearsync_NativeEngine_beginGearCalibration(JNIEnv*, jclass,\n                                                                     jint gear) {\n     g_calibEngine.beginGearCalibration(static_cast<int>(gear));\n     LOGI(\"Guided calibration started for gear %d\", static_cast<int>(gear));\n }\n\n+// Discard captured samples and return to passive mode. (ref: DL-006)\n JNIEXPORT void JNICALL\n Java_dev_alfieprojects_gearsync_NativeEngine_cancelCalibration(JNIEnv*, jclass) {\n     g_calibEngine.cancelCalibration();\n     LOGI(\"Guided calibration cancelled\");\n }\n\n+// Returns calibrationProgress() — range [0, 1]; polled by CalibrationActivity at ~10 Hz.\n JNIEXPORT jfloat JNICALL\n Java_dev_alfieprojects_gearsync_NativeEngine_getCalibrationProgress(JNIEnv*, jclass) {\n     return static_cast<jfloat>(g_calibEngine.calibrationProgress());\n }\n\n } // extern \"C\"\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-002-005",
+          "version": 2,
+          "intent_ref": "CI-M-002-005",
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -408,8 +408,8 @@ Java_dev_alfieprojects_gearsync_NativeEngine_saveCalibrationState(JNIEnv* env, jclass) {\n-    constexpr int LEN = 3 + NUM_GEARS;\n+    constexpr int LEN = 3 + NUM_GEARS + NUM_GEARS;  // 13 floats: Welford + ratios + pins\n     jfloatArray result = env->NewFloatArray(LEN);\n     if (!result) return nullptr;\n \n     float buf[LEN]{};\n     g_calibEngine.serialise(buf, LEN);\n     env->SetFloatArrayRegion(result, 0, LEN, buf);\n     return result;\n }",
+          "doc_diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -408,8 +408,9 @@ Java_dev_alfieprojects_gearsync_NativeEngine_saveCalibrationState(JNIEnv* env, jclass) {\n-    constexpr int LEN = 3 + NUM_GEARS;\n+    // LEN = 3 Welford + 5 ratios + 5 pin flags = 13 floats. (ref: DL-002)\n+    constexpr int LEN = 3 + NUM_GEARS + NUM_GEARS;\n     jfloatArray result = env->NewFloatArray(LEN);\n     if (!result) return nullptr;\n\n     float buf[LEN]{};\n     g_calibEngine.serialise(buf, LEN);\n     env->SetFloatArrayRegion(result, 0, LEN, buf);\n     return result;\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-002-006",
+          "version": 2,
+          "intent_ref": "CI-M-002-006",
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/NativeEngine.kt",
+          "diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/NativeEngine.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/NativeEngine.kt\n@@ -48,4 +48,31 @@ object NativeEngine {\n         speedJitterThresholdMps: Float\n     )\n+\n+    /** Begin guided per-gear calibration for the given 0-based gear index. */\n+    @JvmStatic external fun beginGearCalibration(gear: Int)\n+\n+    /** Cancel an in-progress guided calibration and discard captured data. */\n+    @JvmStatic external fun cancelCalibration()\n+\n+    /**\n+     * Returns the guided-calibration capture progress in [0, 1].\n+     * 0 = no capture started; 1 = ready to lock.\n+     */\n+    @JvmStatic external fun getCalibrationProgress(): Float\n+\n+    /**\n+     * Called from C++ (DSP worker thread) when a guided gear lock succeeds.\n+     * Posts the event to any registered [CalibrationListener] on the main thread.\n+     *\n+     * @param gear 0-based gear index that was locked, or -1 on order-break failure.\n+     */\n+    @JvmStatic fun onGearCalibrated(gear: Int) {\n+        android.os.Handler(android.os.Looper.getMainLooper()).post {\n+            calibrationListener?.onGearCalibrated(gear)\n+        }\n+    }\n+\n+    /** Listener interface for guided-calibration lock events. */\n+    interface CalibrationListener {\n+        fun onGearCalibrated(gear: Int)\n+    }\n+\n+    /** Register a listener to receive [onGearCalibrated] events. Null to unregister. */\n+    @Volatile var calibrationListener: CalibrationListener? = null\n }",
+          "doc_diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/NativeEngine.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/NativeEngine.kt\n@@ -48,4 +48,32 @@ object NativeEngine {\n         speedJitterThresholdMps: Float\n     )\n\n+    /** Begin guided per-gear calibration for the given 0-based gear index.\n+     *  Passive K-Means feeding is suspended until the capture locks or is cancelled. */\n     @JvmStatic external fun beginGearCalibration(gear: Int)\n\n+    /** Cancel an in-progress guided calibration and discard all captured samples. */\n     @JvmStatic external fun cancelCalibration()\n\n-    /**\n-     * Returns the guided-calibration capture progress in [0, 1].\n-     * 0 = no capture started; 1 = ready to lock.\n-     */\n+    /** Capture progress in [0, 1].\n+     *  Value is the minimum of sample-count progress and speed-spread progress;\n+     *  both must reach 1.0 before RANSAC attempts a lock. */\n     @JvmStatic external fun getCalibrationProgress(): Float\n\n-    /**\n-     * Called from C++ (DSP worker thread) when a guided gear lock succeeds.\n-     * Posts the event to any registered [CalibrationListener] on the main thread.\n-     *\n-     * @param gear 0-based gear index that was locked, or -1 on order-break failure.\n-     */\n+    /**\n+     * Called from C++ via the DSP worker JVM upcall when a gear lock completes.\n+     * Marshals the event to the main thread before notifying [calibrationListener].\n+     *\n+     * Must be @JvmStatic so the ProGuard -keep rule for NativeEngine retains it and\n+     * so the static jmethodID cached in startEngine resolves correctly. (ref: DL-003, C-007)\n+     *\n+     * @param gear 0-based gear index that was locked, or -1 when the fitted k_g\n+     *             broke monotonic order and was rejected. (ref: DL-005)\n+     */\n     @JvmStatic fun onGearCalibrated(gear: Int) {\n         android.os.Handler(android.os.Looper.getMainLooper()).post {\n             calibrationListener?.onGearCalibrated(gear)\n         }\n     }\n\n-    /** Listener interface for guided-calibration lock events. */\n+    /** Callback interface for guided-calibration lock events.\n+     *  Implementations must be registered before beginGearCalibration is called. */\n     interface CalibrationListener {\n+        /** @param gear 0-based gear index; -1 signals a failed lock. */\n         fun onGearCalibrated(gear: Int)\n     }\n\n-    /** Register a listener to receive [onGearCalibrated] events. Null to unregister. */\n+    /** Register (or clear) the [CalibrationListener].\n+     *  CalibrationActivity sets this in onCreate and clears it in onDestroy. */\n     @Volatile var calibrationListener: CalibrationListener? = null\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-002-007",
+          "version": 3,
+          "intent_ref": "CI-M-002-005",
+          "file": "app/src/main/cpp/native-lib.cpp",
+          "diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -328,8 +328,14 @@ Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv* env, jclass cls) {\n JNIEXPORT void JNICALL\n-Java_dev_alfieprojects_gearsync_NativeEngine_stopEngine(JNIEnv*, jclass) {\n+Java_dev_alfieprojects_gearsync_NativeEngine_stopEngine(JNIEnv* env, jclass) {\n     g_sensorRunning.store(false);\n     if (g_sensorThread.joinable()) g_sensorThread.join();\n \n     g_dspRunning.store(false);\n     if (g_dspThread.joinable()) g_dspThread.join();\n \n     closeStreams();\n+\n+    if (g_engClass) {\n+        env->DeleteGlobalRef(g_engClass);\n+        g_engClass = nullptr;\n+        g_onGearCalibrated = nullptr;\n+    }\n     LOGI(\"Native engine stopped\");\n }\n",
+          "doc_diff": "--- a/app/src/main/cpp/native-lib.cpp\n+++ b/app/src/main/cpp/native-lib.cpp\n@@ -328,8 +328,12 @@ Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv* env, jclass cls) {\n JNIEXPORT void JNICALL\n Java_dev_alfieprojects_gearsync_NativeEngine_stopEngine(JNIEnv* env, jclass) {\n     g_sensorRunning.store(false);\n     if (g_sensorThread.joinable()) g_sensorThread.join();\n\n     g_dspRunning.store(false);\n     if (g_dspThread.joinable()) g_dspThread.join();\n\n     closeStreams();\n\n+    // Release the global ref created in startEngine. The DSP thread is already\n+    // joined above, so no callbacks can fire after this point. (ref: DL-003, R-001)\n     if (g_engClass) {\n         env->DeleteGlobalRef(g_engClass);\n         g_engClass = nullptr;\n         g_onGearCalibrated = nullptr;\n     }\n     LOGI(\"Native engine stopped\");\n }\n",
+          "comments": ""
+        }
+      ],
+      "documentation": {
+        "module_comment": null,
+        "docstrings": [],
+        "function_blocks": [],
+        "inline_comments": []
+      },
+      "is_documentation_only": false,
+      "delegated_to": null
+    },
+    {
+      "id": "M-003",
+      "version": 1,
+      "number": 3,
+      "name": "Service persistence migration to 13-float calibration state",
+      "files": [
+        "app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt"
+      ],
+      "flags": [
+        "error-handling"
+      ],
+      "requirements": [
+        "CALIBRATION_STATE_LEN becomes 13||persistCalibrationState writes all 13 cal_i keys||restoreCalibrationState reads 13 keys with per-key getFloat default 0.0 so missing cal_8..cal_12 from a legacy install default to unpinned||resume still gated on n>0"
+      ],
+      "acceptance_criteria": [
+        "A legacy install with only cal_0..cal_7 stored loads without exception and leaves pins false||A fresh save/restore round-trips all 13 floats||No Room/SQLite introduced; SharedPreferences only"
+      ],
+      "tests": [
+        "type:integration||backing:doc-derived||normal:save then restore round-trips 13 floats||edge:legacy 8-key prefs restore with pins defaulted to 0.0||error:absent prefs leave engine unseeded||skip_reason:exercised on-device alongside the JNI milestone per C-008"
+      ],
+      "code_intents": [
+        {
+          "id": "CI-M-003-001",
+          "version": 1,
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt",
+          "function": "CALIBRATION_STATE_LEN / persistCalibrationState / restoreCalibrationState",
+          "behavior": "CALIBRATION_STATE_LEN is 13 (3 Welford + 5 ratios + 5 pin flags), documented as kept in sync with native serialise. persistCalibrationState writes whatever length saveCalibrationState returns across cal_0..cal_(len-1). restoreCalibrationState builds a FloatArray(CALIBRATION_STATE_LEN) reading each cal_i with a getFloat default of 0.0, so a legacy install storing only cal_0..cal_7 yields zeros for cal_8..cal_12 (all gears unpinned), and still gates the resume call on array[0] > 0.",
+          "decision_refs": [
+            "DL-002"
+          ]
+        }
+      ],
+      "code_changes": [
+        {
+          "id": "CC-M-003-001",
+          "version": 2,
+          "intent_ref": "CI-M-003-001",
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt",
+          "diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt\n@@ -135,7 +135,8 @@ class ShiftAssistantService : Service() {\n     companion object {\n         private const val NOTIFICATION_ID        = 1\n         private const val CHANNEL_ID             = \"gearsync_fg\"\n         private const val PREFS_NAME             = \"gearsync_calibration\"\n-        // Must stay in sync with native: 3 Welford fields + NUM_GEARS (5) gear ratios.\n-        private const val CALIBRATION_STATE_LEN  = 8\n+        // 3 Welford fields + 5 gear ratios + 5 pin flags = 13 floats.\n+        // Back-compat: old 8-float prefs are accepted by CalibrationEngine.deserialise.\n+        private const val CALIBRATION_STATE_LEN  = 13\n     }\n }",
+          "doc_diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt\n@@ -135,7 +135,9 @@ class ShiftAssistantService : Service() {\n     companion object {\n         private const val NOTIFICATION_ID        = 1\n         private const val CHANNEL_ID             = \"gearsync_fg\"\n         private const val PREFS_NAME             = \"gearsync_calibration\"\n-        // Must stay in sync with native: 3 Welford fields + NUM_GEARS (5) gear ratios.\n-        private const val CALIBRATION_STATE_LEN  = 8\n+        // 3 Welford fields + 5 gear ratios + 5 pin flags = 13 floats.\n+        // CalibrationEngine.deserialise accepts the old 8-float format by defaulting\n+        // missing pin flags to 0.0 (unpinned). (ref: DL-002, R-002)\n         private const val CALIBRATION_STATE_LEN  = 13\n     }\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-003-002",
+          "version": 3,
+          "intent_ref": "CI-M-003-001",
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt",
+          "diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt\n@@ -30,6 +30,7 @@ class ShiftAssistantService : Service() {\n     override fun onCreate() {\n         super.onCreate()\n         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)\n         createNotificationChannel()\n         NativeEngine.startEngine()\n         applyVehicleConfig()\n         restoreCalibrationState()\n+        isRunning = true\n     }\n \n     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {\n@@ -45,6 +46,7 @@ class ShiftAssistantService : Service() {\n     override fun onDestroy() {\n         fusedLocationClient.removeLocationUpdates(locationCallback)\n         persistCalibrationState()\n         NativeEngine.stopEngine()\n+        isRunning = false\n         super.onDestroy()\n     }\n \n@@ -135,7 +137,9 @@ class ShiftAssistantService : Service() {\n     companion object {\n         private const val NOTIFICATION_ID        = 1\n         private const val CHANNEL_ID             = \"gearsync_fg\"\n         private const val PREFS_NAME             = \"gearsync_calibration\"\n         // 3 Welford fields + 5 gear ratios + 5 pin flags = 13 floats.\n         // Back-compat: old 8-float prefs are accepted by CalibrationEngine.deserialise.\n         private const val CALIBRATION_STATE_LEN  = 13\n+\n+        @Volatile var isRunning: Boolean = false\n     }\n }\n",
+          "doc_diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/ShiftAssistantService.kt\n@@ -137,7 +137,9 @@ class ShiftAssistantService : Service() {\n         private const val CALIBRATION_STATE_LEN  = 13\n\n+        /** True while the service is in the created-and-not-yet-destroyed state.\n+         *  Read by MainActivity to gate the \"Calibrate\" button. */\n         @Volatile var isRunning: Boolean = false\n     }\n }\n",
+          "comments": ""
+        }
+      ],
+      "documentation": {
+        "module_comment": null,
+        "docstrings": [],
+        "function_blocks": [],
+        "inline_comments": []
+      },
+      "is_documentation_only": false,
+      "delegated_to": null
+    },
+    {
+      "id": "M-004",
+      "version": 1,
+      "number": 4,
+      "name": "CalibrationActivity UI: gear grid, progress ring, lock confirmation",
+      "files": [
+        "app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt",
+        "app/src/main/java/dev/alfieprojects/gearsync/MainActivity.kt",
+        "app/src/main/res/layout/activity_calibration.xml",
+        "app/src/main/res/layout/activity_main.xml",
+        "app/src/main/res/values/strings.xml",
+        "app/src/main/res/values/colors.xml",
+        "app/src/main/AndroidManifest.xml"
+      ],
+      "flags": [
+        "needs-rationale"
+      ],
+      "requirements": [
+        "CalibrationActivity gates on RECORD_AUDIO + ACCESS_FINE_LOCATION already granted before entry",
+        "finishing back to MainActivity otherwise||gear grid 1..5 calls beginGearCalibration(g-1); the captured gear is greyed during capture||a Choreographer-driven progress ring polls getCalibrationProgress() ~10 Hz and fills using colors from colors.xml",
+        "pausing when not visible||Cancel calls cancelCalibration()||a registered onGearCalibrated listener pulses the ring and marks the gear done",
+        "optionally a VibrationEffect haptic and no audio||MainActivity gains a Start Calibration button launching CalibrationActivity||all visible strings in strings.xml and colors in colors.xml||CalibrationActivity declared in the manifest with exported=false"
+      ],
+      "acceptance_criteria": [
+        "./gradlew assembleDebug succeeds and CalibrationActivity launches from MainActivity||Selecting a gear starts capture and the progress ring fills as getCalibrationProgress increases||A lock event visibly confirms and marks the gear done with no audio output||Entering without RECORD_AUDIO+location finishes back to MainActivity||No hardcoded UI strings or color literals introduced"
+      ],
+      "tests": [
+        "type:integration||backing:default-derived||normal:launch activity",
+        "pick gear",
+        "observe ring fill and lock confirm||edge:ring Choreographer pauses when activity not visible; greyed gear cannot be re-picked mid-capture||error:missing permission path returns to MainActivity||skip_reason:UI plus sensor/audio capture loop verifiable only on a physical arm64 device per C-008"
+      ],
+      "code_intents": [
+        {
+          "id": "CI-M-004-001",
+          "version": 1,
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt",
+          "function": "CalibrationActivity",
+          "behavior": "An AppCompatActivity that on entry checks RECORD_AUDIO and ACCESS_FINE_LOCATION are already granted (same gate semantics as MainActivity); if either is missing it shows a message and finishes back to MainActivity rather than requesting. It presents a 1..5 gear grid; tapping gear N calls NativeEngine.beginGearCalibration(N-1) and greys that gear while capturing. A Choreographer frame callback polls NativeEngine.getCalibrationProgress() at ~10 Hz to drive a progress-ring view, registering on attach and removing on detach/not-visible (mirroring VUMeterView isRunning gating). A Cancel control calls NativeEngine.cancelCalibration() and returns to the grid. It registers a NativeEngine gear-calibrated listener in onResume and clears it in onPause; on a lock it pulses the ring, marks the gear done, and optionally triggers a short VibrationEffect (no audio). All shown text comes from strings.xml and all colors from colors.xml.",
+          "decision_refs": [
+            "DL-004",
+            "DL-001"
+          ]
+        },
+        {
+          "id": "CI-M-004-002",
+          "version": 1,
+          "file": "app/src/main/res/layout/activity_calibration.xml",
+          "function": "activity_calibration layout",
+          "behavior": "A layout providing the gear-selection grid (five selectable gear controls), a progress-ring area, an instruction text line, and a Cancel control, on the dark background. Strings are referenced from strings.xml and colors/backgroundTints from colors.xml; no literal text or color values.",
+          "decision_refs": [
+            "DL-004"
+          ]
+        },
+        {
+          "id": "CI-M-004-003",
+          "version": 1,
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/MainActivity.kt",
+          "function": "MainActivity (calibration launch)",
+          "behavior": "MainActivity wires a Start Calibration button that starts CalibrationActivity via an Intent. The existing start/stop service flow and permission gating are unchanged.",
+          "decision_refs": [
+            "DL-004"
+          ]
+        },
+        {
+          "id": "CI-M-004-004",
+          "version": 1,
+          "file": "app/src/main/res/layout/activity_main.xml",
+          "function": "activity_main (calibration button)",
+          "behavior": "The control row gains a Start Calibration button referencing a strings.xml label and a colors.xml tint, laid out alongside the existing Start/Stop buttons without disturbing the VUMeterView constraints.",
+          "decision_refs": [
+            "DL-004"
+          ]
+        },
+        {
+          "id": "CI-M-004-005",
+          "version": 2,
+          "file": "app/src/main/res/values/strings.xml",
+          "function": "calibration strings",
+          "behavior": "String resources for the calibration flow: a Start Calibration button label, a per-gear capture instruction (hold gear N, vary speed across a range at steady throttle), a gear-locked confirmation, a calibration_lock_failed message explaining the fit was rejected for breaking gear order (try again), a Cancel label, and a permissions-required-for-calibration message.",
+          "decision_refs": [
+            "DL-004",
+            "DL-005"
+          ]
+        },
+        {
+          "id": "CI-M-004-006",
+          "version": 1,
+          "file": "app/src/main/res/values/colors.xml",
+          "function": "calibration colors",
+          "behavior": "Color resources for the calibration UI: progress-ring fill and a captured/greyed gear tint, consistent with the existing VU-meter zone palette, so the activity references named colors rather than literals.",
+          "decision_refs": [
+            "DL-004"
+          ]
+        },
+        {
+          "id": "CI-M-004-007",
+          "version": 1,
+          "file": "app/src/main/AndroidManifest.xml",
+          "function": "CalibrationActivity registration",
+          "behavior": "The manifest declares CalibrationActivity with a relative name (.CalibrationActivity) and android:exported=false, under the existing application element; no new permissions are added (RECORD_AUDIO and location already declared).",
+          "decision_refs": [
+            "DL-004"
+          ]
+        },
+        {
+          "id": "CI-M-004-008",
+          "version": 1,
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt",
+          "function": null,
+          "behavior": "Failed-lock (order-break reject) UI feedback path. When a guided fit is rejected because the resulting k_g would break strict-descending gear order (CalibrationEngine returns -1 / no lock for that capture attempt, per CI-M-001-003), the activity must surface this distinctly from a still-in-progress capture. Because the success upcall onGearCalibrated only fires on a real lock, the activity detects a rejected lock by observing that getCalibrationProgress reached completion (>=1.0 inlier+spread) yet m_calibGear cleared back to IDLE without an onGearCalibrated event: the activity polls isCalibrating()/calibratingGear via getCalibrationProgress polling state and, on this clear-without-lock transition for the gear being captured, shows the calibration_lock_failed string from strings.xml, resets the ring, leaves the gear un-greyed (re-selectable), and optionally a short distinct VibrationEffect (no audio). No string or color literals; the failure message comes from strings.xml.",
+          "decision_refs": [
+            "DL-005",
+            "DL-004"
+          ]
+        }
+      ],
+      "code_changes": [
+        {
+          "id": "CC-M-004-001",
+          "version": 2,
+          "intent_ref": "CI-M-004-001",
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt",
+          "diff": "--- /dev/null\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt\n@@ -0,0 +1,136 @@\n+package dev.alfieprojects.gearsync\n+\n+import android.Manifest\n+import android.content.pm.PackageManager\n+import android.graphics.Canvas\n+import android.graphics.Paint\n+import android.graphics.RectF\n+import android.os.Bundle\n+import android.view.Choreographer\n+import android.view.View\n+import android.view.ViewGroup\n+import android.widget.Button\n+import android.widget.LinearLayout\n+import android.widget.TextView\n+import android.widget.Toast\n+import androidx.appcompat.app.AppCompatActivity\n+import androidx.core.content.ContextCompat\n+\n+class CalibrationActivity : AppCompatActivity(), NativeEngine.CalibrationListener {\n+\n+    private lateinit var gearButtons: List<Button>\n+    private lateinit var statusText: TextView\n+    private lateinit var progressRing: ProgressRingView\n+    private lateinit var btnCancel: Button\n+\n+    private var activeGear: Int = -1\n+\n+    private val choreographerCallback = object : Choreographer.FrameCallback {\n+        override fun doFrame(frameTimeNanos: Long) {\n+            if (activeGear >= 0) {\n+                val progress = NativeEngine.getCalibrationProgress()\n+                progressRing.setProgress(progress)\n+                Choreographer.getInstance().postFrameCallback(this)\n+            }\n+        }\n+    }\n+\n+    override fun onCreate(savedInstanceState: Bundle?) {\n+        super.onCreate(savedInstanceState)\n+        setContentView(R.layout.activity_calibration)\n+\n+        if (!hasRequiredPermissions()) {\n+            Toast.makeText(this, R.string.calib_permissions_required, Toast.LENGTH_LONG).show()\n+            finish()\n+            return\n+        }\n+\n+        gearButtons = listOf(\n+            findViewById(R.id.btnGear1),\n+            findViewById(R.id.btnGear2),\n+            findViewById(R.id.btnGear3),\n+            findViewById(R.id.btnGear4),\n+            findViewById(R.id.btnGear5)\n+        )\n+        statusText   = findViewById(R.id.tvCalibStatus)\n+        progressRing = findViewById(R.id.progressRing)\n+        btnCancel    = findViewById(R.id.btnCancelCalib)\n+\n+        gearButtons.forEachIndexed { index, button ->\n+            button.setOnClickListener { startCapture(index) }\n+        }\n+        btnCancel.setOnClickListener { cancelCapture() }\n+\n+        NativeEngine.calibrationListener = this\n+        showGearGrid()\n+    }\n+\n+    override fun onDestroy() {\n+        NativeEngine.cancelCalibration()\n+        NativeEngine.calibrationListener = null\n+        Choreographer.getInstance().removeFrameCallback(choreographerCallback)\n+        super.onDestroy()\n+    }\n+\n+    private fun startCapture(gearIndex: Int) {\n+        activeGear = gearIndex\n+        NativeEngine.beginGearCalibration(gearIndex)\n+        val gearNumber = gearIndex + 1\n+        statusText.text = getString(R.string.calib_capturing, gearNumber)\n+        progressRing.setProgress(0f)\n+        progressRing.visibility = View.VISIBLE\n+        btnCancel.visibility = View.VISIBLE\n+        gearButtons.forEach { it.isEnabled = false }\n+        Choreographer.getInstance().postFrameCallback(choreographerCallback)\n+    }\n+\n+    private fun cancelCapture() {\n+        activeGear = -1\n+        NativeEngine.cancelCalibration()\n+        Choreographer.getInstance().removeFrameCallback(choreographerCallback)\n+        showGearGrid()\n+    }\n+\n+    private fun showGearGrid() {\n+        activeGear = -1\n+        statusText.text = getString(R.string.calib_pick_gear)\n+        progressRing.visibility = View.GONE\n+        btnCancel.visibility = View.GONE\n+        gearButtons.forEach { it.isEnabled = true }\n+    }\n+\n+    override fun onGearCalibrated(gear: Int) {\n+        Choreographer.getInstance().removeFrameCallback(choreographerCallback)\n+        if (gear < 0) {\n+            progressRing.setProgress(0f)\n+            Toast.makeText(this, R.string.calib_lock_failed, Toast.LENGTH_LONG).show()\n+            showGearGrid()\n+        } else {\n+            progressRing.setProgress(1f)\n+            val gearNumber = gear + 1\n+            statusText.text = getString(R.string.calib_locked, gearNumber)\n+            gearButtons.getOrNull(gear)?.isEnabled = false\n+            btnCancel.visibility = View.GONE\n+            activeGear = -1\n+        }\n+    }\n+\n+    private fun hasRequiredPermissions(): Boolean {\n+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==\n+                PackageManager.PERMISSION_GRANTED &&\n+               ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==\n+                PackageManager.PERMISSION_GRANTED\n+    }\n+\n+    inner class ProgressRingView(context: android.content.Context) : View(context) {\n+        private var progress = 0f\n+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {\n+            style = Paint.Style.STROKE\n+            strokeWidth = 16f\n+        }\n+        private val oval = RectF()\n+\n+        fun setProgress(p: Float) { progress = p.coerceIn(0f, 1f); invalidate() }\n+\n+        override fun onDraw(canvas: Canvas) {\n+            val r = (minOf(width, height) / 2f) - paint.strokeWidth\n+            oval.set(width / 2f - r, height / 2f - r, width / 2f + r, height / 2f + r)\n+            paint.color = resources.getColor(R.color.calib_ring_track, theme)\n+            canvas.drawArc(oval, 0f, 360f, false, paint)\n+            paint.color = when {\n+                progress < 0.33f -> resources.getColor(R.color.zone_lug,     theme)\n+                progress < 0.66f -> resources.getColor(R.color.zone_optimal, theme)\n+                else             -> resources.getColor(R.color.zone_redline,  theme)\n+            }\n+            canvas.drawArc(oval, -90f, progress * 360f, false, paint)\n+        }\n+    }\n+}",
+          "doc_diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt\n@@ -1,4 +1,13 @@\n package dev.alfieprojects.gearsync\n\n+// CalibrationActivity — guided per-gear calibration UI.\n+//\n+// Flow: gear grid -> tap a gear -> capture screen (progress ring, ~10 Hz poll) ->\n+//       RANSAC locks -> confirmation shown; or user cancels at any point.\n+//\n+// Requires RECORD_AUDIO and location permissions (already granted to the running\n+// ShiftAssistantService); finishes immediately if permissions are absent.\n+// (ref: DL-004)\n\n import android.Manifest\n import android.content.pm.PackageManager\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-004-002",
+          "version": 2,
+          "intent_ref": "CI-M-004-002",
+          "file": "app/src/main/res/layout/activity_calibration.xml",
+          "diff": "--- /dev/null\n+++ b/app/src/main/res/layout/activity_calibration.xml\n@@ -0,0 +1,101 @@\n+<?xml version=\"1.0\" encoding=\"utf-8\"?>\n+<androidx.constraintlayout.widget.ConstraintLayout\n+    xmlns:android=\"http://schemas.android.com/apk/res/android\"\n+    xmlns:app=\"http://schemas.android.com/apk/res-auto\"\n+    android:layout_width=\"match_parent\"\n+    android:layout_height=\"match_parent\"\n+    android:background=\"@color/background_dark\">\n+\n+    <TextView\n+        android:id=\"@+id/tvCalibStatus\"\n+        android:layout_width=\"0dp\"\n+        android:layout_height=\"wrap_content\"\n+        android:textColor=\"#FFFFFF\"\n+        android:textSize=\"18sp\"\n+        android:gravity=\"center\"\n+        android:padding=\"16dp\"\n+        app:layout_constraintTop_toTopOf=\"parent\"\n+        app:layout_constraintStart_toStartOf=\"parent\"\n+        app:layout_constraintEnd_toEndOf=\"parent\" />\n+\n+    <LinearLayout\n+        android:id=\"@+id/gearGrid\"\n+        android:layout_width=\"0dp\"\n+        android:layout_height=\"wrap_content\"\n+        android:orientation=\"horizontal\"\n+        android:gravity=\"center\"\n+        android:padding=\"16dp\"\n+        app:layout_constraintTop_toBottomOf=\"@id/tvCalibStatus\"\n+        app:layout_constraintStart_toStartOf=\"parent\"\n+        app:layout_constraintEnd_toEndOf=\"parent\">\n+\n+        <Button\n+            android:id=\"@+id/btnGear1\"\n+            android:layout_width=\"0dp\"\n+            android:layout_weight=\"1\"\n+            android:layout_height=\"56dp\"\n+            android:layout_margin=\"4dp\"\n+            android:text=\"@string/gear_label_1\"\n+            android:backgroundTint=\"@color/calib_gear_button\" />\n+\n+        <Button\n+            android:id=\"@+id/btnGear2\"\n+            android:layout_width=\"0dp\"\n+            android:layout_weight=\"1\"\n+            android:layout_height=\"56dp\"\n+            android:layout_margin=\"4dp\"\n+            android:text=\"@string/gear_label_2\"\n+            android:backgroundTint=\"@color/calib_gear_button\" />\n+\n+        <Button\n+            android:id=\"@+id/btnGear3\"\n+            android:layout_width=\"0dp\"\n+            android:layout_weight=\"1\"\n+            android:layout_height=\"56dp\"\n+            android:layout_margin=\"4dp\"\n+            android:text=\"@string/gear_label_3\"\n+            android:backgroundTint=\"@color/calib_gear_button\" />\n+\n+        <Button\n+            android:id=\"@+id/btnGear4\"\n+            android:layout_width=\"0dp\"\n+            android:layout_weight=\"1\"\n+            android:layout_height=\"56dp\"\n+            android:layout_margin=\"4dp\"\n+            android:text=\"@string/gear_label_4\"\n+            android:backgroundTint=\"@color/calib_gear_button\" />\n+\n+        <Button\n+            android:id=\"@+id/btnGear5\"\n+            android:layout_width=\"0dp\"\n+            android:layout_weight=\"1\"\n+            android:layout_height=\"56dp\"\n+            android:layout_margin=\"4dp\"\n+            android:text=\"@string/gear_label_5\"\n+            android:backgroundTint=\"@color/calib_gear_button\" />\n+\n+    </LinearLayout>\n+\n+    <dev.alfieprojects.gearsync.CalibrationActivity.ProgressRingView\n+        android:id=\"@+id/progressRing\"\n+        android:layout_width=\"200dp\"\n+        android:layout_height=\"200dp\"\n+        android:visibility=\"gone\"\n+        app:layout_constraintTop_toBottomOf=\"@id/gearGrid\"\n+        app:layout_constraintStart_toStartOf=\"parent\"\n+        app:layout_constraintEnd_toEndOf=\"parent\" />\n+\n+    <Button\n+        android:id=\"@+id/btnCancelCalib\"\n+        android:layout_width=\"wrap_content\"\n+        android:layout_height=\"56dp\"\n+        android:layout_marginTop=\"16dp\"\n+        android:text=\"@string/btn_cancel_calib\"\n+        android:backgroundTint=\"@color/button_stop\"\n+        android:visibility=\"gone\"\n+        app:layout_constraintTop_toBottomOf=\"@id/progressRing\"\n+        app:layout_constraintStart_toStartOf=\"parent\"\n+        app:layout_constraintEnd_toEndOf=\"parent\" />\n+\n+</androidx.constraintlayout.widget.ConstraintLayout>",
+          "doc_diff": "--- a/app/src/main/res/layout/activity_calibration.xml\n+++ b/app/src/main/res/layout/activity_calibration.xml\n@@ -1,4 +1,8 @@\n <?xml version=\"1.0\" encoding=\"utf-8\"?>\n+<!--\n+  CalibrationActivity layout: status text, 5-gear button row, progress ring,\n+  and cancel button. All colors from colors.xml; all labels from strings.xml.\n+  (ref: DL-004)\n+-->\n <androidx.constraintlayout.widget.ConstraintLayout\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-004-003",
+          "version": 3,
+          "intent_ref": "CI-M-004-003",
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/MainActivity.kt",
+          "diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/MainActivity.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/MainActivity.kt\n@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {\n         setContentView(R.layout.activity_main)\n \n         findViewById<Button>(R.id.btnStart).setOnClickListener { checkAndStart() }\n         findViewById<Button>(R.id.btnStop).setOnClickListener  { stopShiftService() }\n+        findViewById<Button>(R.id.btnCalibrate).setOnClickListener { openCalibration() }\n     }\n \n     private fun checkAndStart() {\n@@ -56,4 +57,13 @@ class MainActivity : AppCompatActivity() {\n         stopService(Intent(this, ShiftAssistantService::class.java))\n         Toast.makeText(this, R.string.service_stopped, Toast.LENGTH_SHORT).show()\n     }\n+\n+    private fun openCalibration() {\n+        if (!ShiftAssistantService.isRunning) {\n+            Toast.makeText(this, R.string.calib_service_not_running, Toast.LENGTH_LONG).show()\n+            return\n+        }\n+        startActivity(Intent(this, CalibrationActivity::class.java))\n+    }\n }\n",
+          "doc_diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/MainActivity.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/MainActivity.kt\n@@ -56,4 +57,9 @@ class MainActivity : AppCompatActivity() {\n         stopService(Intent(this, ShiftAssistantService::class.java))\n         Toast.makeText(this, R.string.service_stopped, Toast.LENGTH_SHORT).show()\n     }\n\n+    // Guard against opening CalibrationActivity when the service is not running:\n+    // NativeEngine.beginGearCalibration would silently no-op and the UI would\n+    // show no progress. (ref: DL-004)\n     private fun openCalibration() {\n         if (!ShiftAssistantService.isRunning) {\n             Toast.makeText(this, R.string.calib_service_not_running, Toast.LENGTH_LONG).show()\n             return\n         }\n         startActivity(Intent(this, CalibrationActivity::class.java))\n     }\n }\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-004-004",
+          "version": 2,
+          "intent_ref": "CI-M-004-004",
+          "file": "app/src/main/res/layout/activity_main.xml",
+          "diff": "--- a/app/src/main/res/layout/activity_main.xml\n+++ b/app/src/main/res/layout/activity_main.xml\n@@ -42,6 +42,13 @@ app:layout_constraintEnd_toEndOf=\"parent\">\n         <Button\n             android:id=\"@+id/btnStop\"\n             android:layout_width=\"0dp\"\n             android:layout_weight=\"1\"\n             android:layout_height=\"56dp\"\n             android:layout_marginStart=\"8dp\"\n             android:text=\"@string/btn_stop\"\n             android:backgroundTint=\"@color/button_stop\" />\n+\n+        <Button\n+            android:id=\"@+id/btnCalibrate\"\n+            android:layout_width=\"0dp\"\n+            android:layout_weight=\"1\"\n+            android:layout_height=\"56dp\"\n+            android:layout_marginStart=\"8dp\"\n+            android:text=\"@string/btn_calibrate\"\n+            android:backgroundTint=\"@color/calib_gear_button\" />\n \n     </LinearLayout>\n \n </androidx.constraintlayout.widget.ConstraintLayout>",
+          "doc_diff": "--- a/app/src/main/res/layout/activity_main.xml\n+++ b/app/src/main/res/layout/activity_main.xml\n@@ -42,6 +42,8 @@ app:layout_constraintEnd_toEndOf=\"parent\">\n+        <!-- Calibrate button: enabled only when ShiftAssistantService.isRunning.\n+             Gating is enforced in MainActivity.openCalibration(). (ref: DL-004) -->\n         <Button\n             android:id=\"@+id/btnCalibrate\"\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-004-005",
+          "version": 3,
+          "intent_ref": "CI-M-004-005",
+          "file": "app/src/main/res/values/strings.xml",
+          "diff": "--- a/app/src/main/res/values/strings.xml\n+++ b/app/src/main/res/values/strings.xml\n@@ -7,4 +7,14 @@ <string name=\"app_name\">GearSync</string>\n     <string name=\"service_started\">GearSync started</string>\n     <string name=\"service_stopped\">GearSync stopped</string>\n     <string name=\"permissions_required\">Permissions required: %1$s</string>\n+    <string name=\"btn_calibrate\">Calibrate</string>\n+    <string name=\"btn_cancel_calib\">Cancel</string>\n+    <string name=\"calib_pick_gear\">Pick a gear to calibrate</string>\n+    <string name=\"calib_capturing\">Hold gear %1$d — vary speed, steady throttle</string>\n+    <string name=\"calib_locked\">Gear %1$d locked</string>\n+    <string name=\"calib_lock_failed\">Calibration failed — gear order conflict. Try again.</string>\n+    <string name=\"calib_permissions_required\">RECORD_AUDIO and location permissions required</string>\n+    <string name=\"gear_label_1\">1</string>\n+    <string name=\"gear_label_2\">2</string>\n+    <string name=\"gear_label_3\">3</string>\n+    <string name=\"gear_label_4\">4</string>\n+    <string name=\"gear_label_5\">5</string>\n+    <string name=\"calib_service_not_running\">Start the GearSync service first, then open Calibrate.</string>\n </resources>",
+          "doc_diff": "--- a/app/src/main/res/values/strings.xml\n+++ b/app/src/main/res/values/strings.xml\n@@ -7,4 +7,5 @@ <string name=\"app_name\">GearSync</string>\n+    <!-- Guided calibration strings. calib_capturing uses %1$d = 1-based gear number. -->\n     <string name=\"btn_calibrate\">Calibrate</string>\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-004-006",
+          "version": 2,
+          "intent_ref": "CI-M-004-006",
+          "file": "app/src/main/res/values/colors.xml",
+          "diff": "--- a/app/src/main/res/values/colors.xml\n+++ b/app/src/main/res/values/colors.xml\n@@ -3,4 +3,9 @@ <?xml version=\"1.0\" encoding=\"utf-8\"?>\n     <color name=\"background_dark\">#0D0D1A</color>\n     <color name=\"button_start\">#27AE60</color>\n     <color name=\"button_stop\">#E74C3C</color>\n+    <color name=\"calib_gear_button\">#2980B9</color>\n+    <color name=\"calib_ring_track\">#333355</color>\n+    <color name=\"zone_lug\">#3498DB</color>\n+    <color name=\"zone_optimal\">#27AE60</color>\n+    <color name=\"zone_redline\">#E74C3C</color>\n </resources>",
+          "doc_diff": "--- a/app/src/main/res/values/colors.xml\n+++ b/app/src/main/res/values/colors.xml\n@@ -3,4 +3,6 @@ <?xml version=\"1.0\" encoding=\"utf-8\"?>\n+    <!-- Calibration UI colors. zone_* mirror the VU meter zone colors for visual consistency. -->\n     <color name=\"calib_gear_button\">#2980B9</color>\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-004-007",
+          "version": 2,
+          "intent_ref": "CI-M-004-007",
+          "file": "app/src/main/AndroidManifest.xml",
+          "diff": "--- a/app/src/main/AndroidManifest.xml\n+++ b/app/src/main/AndroidManifest.xml\n@@ -27,6 +27,12 @@ <application\n             <intent-filter>\n                 <action android:name=\"android.intent.action.MAIN\" />\n                 <category android:name=\"android.intent.category.LAUNCHER\" />\n             </intent-filter>\n         </activity>\n \n+        <activity\n+            android:name=\".CalibrationActivity\"\n+            android:exported=\"false\"\n+            android:label=\"@string/btn_calibrate\"\n+            android:windowSoftInputMode=\"stateHidden\" />\n+\n         <service\n             android:name=\".ShiftAssistantService\"\n             android:exported=\"false\"\n             android:foregroundServiceType=\"microphone|location\" />\n \n     </application>",
+          "doc_diff": "--- a/app/src/main/AndroidManifest.xml\n+++ b/app/src/main/AndroidManifest.xml\n@@ -27,6 +27,8 @@ <application\n+        <!-- CalibrationActivity: not exported; launched only from MainActivity.\n+             android:exported=\"false\" is required since targetSdk >= 31. (ref: DL-004) -->\n         <activity\n             android:name=\".CalibrationActivity\"\n",
+          "comments": ""
+        },
+        {
+          "id": "CC-M-004-008",
+          "version": 2,
+          "intent_ref": "CI-M-004-008",
+          "file": "app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt",
+          "diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt\n@@ -70,7 +70,16 @@ class CalibrationActivity : AppCompatActivity(), NativeEngine.CalibrationListener {\n     override fun onGearCalibrated(gear: Int) {\n         Choreographer.getInstance().removeFrameCallback(choreographerCallback)\n         if (gear < 0) {\n             progressRing.setProgress(0f)\n             Toast.makeText(this, R.string.calib_lock_failed, Toast.LENGTH_LONG).show()\n             showGearGrid()\n         } else {\n             progressRing.setProgress(1f)\n             val gearNumber = gear + 1\n             statusText.text = getString(R.string.calib_locked, gearNumber)\n             gearButtons.getOrNull(gear)?.isEnabled = false\n             btnCancel.visibility = View.GONE\n             activeGear = -1\n         }\n     }",
+          "doc_diff": "--- a/app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt\n+++ b/app/src/main/java/dev/alfieprojects/gearsync/CalibrationActivity.kt\n@@ -70,7 +70,13 @@ class CalibrationActivity : AppCompatActivity(), NativeEngine.CalibrationListener {\n+    // NativeEngine.CalibrationListener implementation.\n+    // Called on the main thread (NativeEngine.onGearCalibrated marshals via Handler).\n+    // gear < 0 means RANSAC fit was rejected due to monotonicity-breaking k_g. (ref: DL-005)\n     override fun onGearCalibrated(gear: Int) {\n         Choreographer.getInstance().removeFrameCallback(choreographerCallback)\n         if (gear < 0) {\n",
+          "comments": ""
+        }
+      ],
+      "documentation": {
+        "module_comment": null,
+        "docstrings": [],
+        "function_blocks": [],
+        "inline_comments": []
+      },
+      "is_documentation_only": false,
+      "delegated_to": null
+    }
+  ],
+  "waves": [
+    {
+      "id": "W-001",
+      "milestones": [
+        "M-001"
+      ]
+    },
+    {
+      "id": "W-002",
+      "milestones": [
+        "M-002"
+      ]
+    },
+    {
+      "id": "W-003",
+      "milestones": [
+        "M-003",
+        "M-004"
+      ]
+    }
+  ],
+  "diagram_graphs": [
+    {
+      "id": "DIAG-001",
+      "type": "dataflow",
+      "scope": "overview",
+      "title": "Guided calibration data flow and onGearCalibrated upcall",
+      "nodes": [
+        {
+          "id": "mic",
+          "label": "Mic + FFT (audio callback)",
+          "type": "service"
+        },
+        {
+          "id": "dsp",
+          "label": "DSP worker (CAPTURING route)",
+          "type": "service"
+        },
+        {
+          "id": "engine",
+          "label": "CalibrationEngine (RANSAC, pins)",
+          "type": "service"
+        },
+        {
+          "id": "native",
+          "label": "native-lib JNI (global refs)",
+          "type": "service"
+        },
+        {
+          "id": "activity",
+          "label": "CalibrationActivity (ring + listener)",
+          "type": "service"
+        },
+        {
+          "id": "prefs",
+          "label": "SharedPreferences (13 floats)",
+          "type": "datastore"
+        }
+      ],
+      "edges": [
+        {
+          "source": "mic",
+          "target": "dsp",
+          "label": "PCM snapshot (lock-free SPSC)",
+          "protocol": "in-proc"
+        },
+        {
+          "source": "dsp",
+          "target": "engine",
+          "label": "feedCalibrationSample(speed,hz) while CAPTURING",
+          "protocol": "in-proc"
+        },
+        {
+          "source": "engine",
+          "target": "dsp",
+          "label": "locked gear index on RANSAC lock (-1 otherwise)",
+          "protocol": "return"
+        },
+        {
+          "source": "dsp",
+          "target": "native",
+          "label": "upcall outside m_mutex via attached env",
+          "protocol": "JNI"
+        },
+        {
+          "source": "native",
+          "target": "activity",
+          "label": "onGearCalibrated(gear) -> main-thread listener",
+          "protocol": "JNI/Handler"
+        },
+        {
+          "source": "activity",
+          "target": "native",
+          "label": "beginGearCalibration / cancel / getCalibrationProgress ~10 Hz",
+          "protocol": "JNI"
+        },
+        {
+          "source": "engine",
+          "target": "prefs",
+          "label": "serialise 13 floats on stop; deserialise pad-and-default on start",
+          "protocol": "KV"
+        }
+      ],
+      "ascii_render": null
+    }
+  ],
+  "readme_entries": []
+}

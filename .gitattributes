@@ -1,0 +1,5 @@
+# Force CRLF for Windows batch scripts so they parse correctly on Windows/CI.
+*.bat text eol=crlf
+
+# Normalize everything else to LF.
+* text=auto

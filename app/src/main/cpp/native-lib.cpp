@@ -217,12 +217,12 @@ static InputCallback                      g_inputCallback;
 static bool openStreams() {
     oboe::AudioStreamBuilder inBuilder;
     inBuilder.setDirection(oboe::Direction::Input)
-             .setPerformanceMode(oboe::PerformanceMode::LowLatency)
-             .setSharingMode(oboe::SharingMode::Exclusive)
-             .setFormat(oboe::AudioFormat::Float)
-             .setChannelCount(1)
-             .setSampleRate(SAMPLE_RATE)
-             .setDataCallback(&g_inputCallback);
+             ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+             ->setSharingMode(oboe::SharingMode::Exclusive)
+             ->setFormat(oboe::AudioFormat::Float)
+             ->setChannelCount(1)
+             ->setSampleRate(SAMPLE_RATE)
+             ->setDataCallback(&g_inputCallback);
 
     oboe::Result result = inBuilder.openStream(g_inputStream);
     if (result != oboe::Result::OK || !g_inputStream) {
