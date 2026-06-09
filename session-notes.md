@@ -96,7 +96,112 @@ Requires a local machine with:
 ## Open items / next steps
 
 - Add `mipmap/` launcher icons (currently only `ic_notification` vector exists)
-- Wire up a calibration UI flow (guided per-gear calibration using RANSAC as described in ADR 002)
-- Add `onGearCalibrated(int gear)` JNI callback from C++ → Kotlin to update UI when a gear locks in
+- [DONE] Guided per-gear calibration using RANSAC (ADR 002):
+  - `CalibrationEngine`: RANSAC slope fit, capture state machine, pin flags, 8->13 float migration
+  - `native-lib.cpp`: DSP worker routing, JVM attach/detach, `JNI_OnLoad` JavaVM cache,
+    `startEngine` global jclass/jmethodID cache, `onGearCalibrated` upcall after mutex release
+  - `NativeEngine.kt`: 3 new externals (`beginGearCalibration`, `cancelCalibration`,
+    `getCalibrationProgress`) + `onGearCalibrated` @JvmStatic + `CalibrationListener` interface
+  - `ShiftAssistantService.kt`: `CALIBRATION_STATE_LEN` 8 -> 13; `isRunning` companion flag
+  - New `CalibrationActivity` + `ProgressRingView` + `activity_calibration.xml`: gear grid, ring, lock confirm
+  - `MainActivity`: "Calibrate" button gated on `ShiftAssistantService.isRunning`
+  - Calib colors isolated in `colors_calibration.xml` (codex owns `colors.xml`/VU meter separately)
+  - Host unit tests: `cpp/test/test_ransac_host.cpp` (compiled + passing without NDK)
+  - Persistence back-compat: old 8-float `SharedPreferences` blobs load correctly (pins default 0)
+  - Invariants preserved: m_gearRatios strictly descending, passive K-Means default, m_mutex never held across upcall
+- [DONE] `onGearCalibrated(int gear)` JNI callback C++ -> Kotlin
 - Consider `AudioEffect` or AGC on the input stream to normalise mic levels across devices
 - Test on physical arm64 device; validate FFT peak detection against known engine frequencies
+- Validate RANSAC params (N_min=20, eps=3%, inlier_frac=0.6, Delta_v_min=2 m/s) on device
+
+---
+
+## Session 3 (2026-06-08 / 2026-06-09)
+
+**Branch:** `main` · **Machine:** finch@ArP-ThinkPad-T420 (local, has Android SDK)
+
+### Repo sync — v2 work merged into main
+
+- `claude/focused-turing-1xGm4` had 2 commits past the squash-merge that never reached main: the real v2 (visual-only) work. Merged into `main` (merge commit), resolving 7 add/add conflicts by taking branch (= logical superset).
+- main now has: audio output removed, `vehicle_config.json` (Toyota Wigo 1.0 E M/T), `VehicleConfig.kt`, shift decision logic, README "Shift Decision Logic" + "Current Limitations".
+- Deleted remote branch `claude/focused-turing-1xGm4` after merge.
+
+### Package rename
+
+- `com.app.shiftassistant` → **`dev.alfieprojects.gearsync`** (matches project + GitHub org).
+- Updated: 5 java file moves, package decls, 7 JNI symbols (`Java_dev_alfieprojects_gearsync_NativeEngine_*`), `ASensorManager_getInstanceForPackage` string, `build.gradle` namespace + applicationId, `proguard-rules.pro`, layout custom-view tag. Manifest uses relative `.MainActivity` (no edit). Verified 7 Kt externals ↔ 7 JNI exports.
+- `ShiftAssistantService` class name kept (not package-related).
+
+### Build infra — now buildable from clean checkout
+
+Was missing everything needed to build. Added:
+- Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle-wrapper.jar` 8.14.1) — fetched from gradle/gradle v8.14.1.
+- `gradle.properties`: `android.useAndroidX=true` (AndroidX deps failed without it), `nonTransitiveRClass`, jvm args.
+- Pinned `ndkVersion '27.1.12297006'` — AGP 8.3 default 25.1 not installed (SDK has 27 & 28).
+- `local.properties` → `sdk.dir=/home/finch/Android/Sdk` (gitignored, machine-specific).
+- Adaptive launcher icons (`mipmap-anydpi-v26/ic_launcher{,_round}.xml` + `ic_launcher_{background,foreground}.xml`) — gauge/needle motif. Manifest referenced nonexistent `@mipmap/ic_launcher`.
+- `.gitignore` (build/, .gradle/, local.properties, .cxx/, IDE files).
+
+**C++ compile bugfix:** `native-lib.cpp` Oboe `AudioStreamBuilder` chain used `.` on a `*` — must be `->`. Hard compile error. Fixed.
+
+**Verified green:** `./gradlew assembleDebug` → `app-debug.apk` (9.4M). NDK 27.1.12297006 + this machine's SDK.
+
+### Guided calibration — design + plan (design-only, no source changes)
+
+- Wrote `guided-calibration-design.md`: optional, additive guided per-gear calibration (RANSAC line-through-origin) layered on passive auto-calibration. Auto stays default.
+- Resolved 2 open decisions: **pin guided gears = YES** (state array 8→13 floats, pad-and-default deserialise); **dedicated CalibrationActivity** (not MainActivity mode flag).
+- Ran `planner` skill (multi-agent: architect → quality-reviewer → developer → technical-writer, with QR gates). Output: `plans/guided-calibration-implementation-plan.{md,json}`. 4 milestones / 3 waves, 26 code changes, passed design/code/docs QR gates.
+- QR caught 7 real defects pre-implementation (most critical: duplicate `startEngine` JNI symbol → would've been a compile failure / UnsatisfiedLinkError; `g_engClass` global ref leak; host-test access to `private ransacFit`).
+
+### Commits this session (on `main`, ahead of origin)
+
+```text
+ad8d249 docs: add guided calibration implementation plan
+da66bf9 docs: add guided per-gear calibration design note (RANSAC)
+eecce93 build: add gradle wrapper, gradle.properties, NDK pin, launcher icons
+686cfce fix(dsp): use -> on Oboe AudioStreamBuilder chain
+d70b5ca docs: add CLAUDE.md project guide
+c5cf166 refactor: rename package com.app.shiftassistant -> dev.alfieprojects.gearsync
+b12db0a Merge remote-tracking branch 'origin/claude/focused-turing-1xGm4'
+```
+
+`d70b5ca` and earlier pushed; `686cfce`..`ad8d249` (5 commits) **not yet pushed** to `origin/main`.
+
+### Open items updated
+
+- ✅ Launcher icons added (adaptive). ✅ CLAUDE.md added. ✅ Package renamed. ✅ Buildable.
+- ⏳ Guided calibration: design + plan done; **implementation not started** (plan in `plans/`).
+- ⏳ `onGearCalibrated(int)` callback — specified in plan, not yet coded.
+- ⏳ Test FFT peak detection on physical arm64 device.
+- Note: pre-existing uncommitted edits to `VUMeterView.kt`, `activity_main.xml`, `colors.xml` + untracked `vu-meter-specs.md` — not mine, left alone.
+
+---
+
+## Session 2026-06-09 — guided calibration implemented + VU redesign landed + PR workflow
+
+Adopted a **branch + PR + CodeRabbit** flow (never commit to `main`). Helper scripts live in `scripts/` (untracked; `gh pr create`/merge are sandbox-blocked, so they're run via `!`).
+
+### Shipped
+- **Guided calibration implemented** from `plans/guided-calibration-implementation-plan.md` (all 4 milestones): RANSAC slope fit + capture state machine + pin flags + 8→13-float persistence migration (legacy back-compat); `onGearCalibrated` DSP-worker JVM upcall (JNI_OnLoad JavaVM cache + startEngine global refs, fired outside `m_mutex`); `CalibrationActivity` + top-level `ProgressRingView`; `MainActivity` Calibrate button. Host tests `cpp/test/test_ransac_host.cpp` — **8/8 pass** (no NDK).
+- **VU meter redesign** (codex's `vu-meter-specs.md`) was already implemented in the working tree; landed it. Calibration deliberately avoided codex-owned `colors.xml`/`VUMeterView.kt` — calib colors isolated in `colors_calibration.xml`; only shared file is `activity_main.xml` (+Calibrate button).
+
+### PR board (repo: `alfieprojectsdev/gearsync`, CodeRabbit on)
+- **#2** VU redesign → `main` — **MERGED** (merge commit, to keep stacked diff clean).
+- **#4** `chore` gradlew.bat CRLF + `.gitattributes` → `main` — **MERGED** (squash).
+- **#3** guided calibration → `main` (retargeted from the VU branch via REST after `gh pr edit` hit a gh projects-classic bug) — **OPEN, mergeable**, diff is calibration-only. All **7 CodeRabbit findings addressed** in `e5d765f` (Majors: unbounded capture/throttle; pin-by-index not sorted-slot; cache `calibratingGear()` for the upcall; re-enable gear buttons after a lock). CR won't re-review a stacked PR's already-seen commits — retarget-to-main was the fix.
+- **#5** docs ADR 004 (accel-FFT sensor fusion note) → `main` — **OPEN**.
+
+### Key decisions / gotchas (for resume)
+- `ProgressRingView` is **top-level**, not the plan's inner class — `LayoutInflater` can't construct an inner class from XML.
+- Pins bind to **gear index**, never sorted-ratio slot (CR Major) — `feedCalibrationSample` no longer re-sorts (order-guard already keeps descending); K-Means keeps pinned slots fixed, sorts only unpinned + monotonic repair.
+- Persisted state = **13 floats** `[n, mean, m2, ratio0..4, pin0..4]`; `deserialise` still loads legacy 8-float (pins→0). 10 JNI externals ↔ 10 exports + `onGearCalibrated` upcall.
+- Stacked PRs don't auto-review (CR base must = default branch). `phyphox-android` cloned at `/home/finch/repos/phyphox-android`, symlinked `research/phyphox-android` (in `.git/info/exclude`), **GPLv3 — ideas only**.
+
+### Next / handed off
+- **Merge #3** (and #5) when CR is green.
+- **ADR 004 implementation plan → handed to Codex** (free tier). Probe-first. Paste brief:
+
+  > Read `accel-fft-sensor-fusion-design.md`, `adr.md` (ADR 001/002), and `native-lib.cpp` (`findDominantHz`, `dspWorkerFn`, the PCM SPSC ring). Draft an IMPLEMENTATION PLAN (milestones, like `guided-calibration-implementation-plan.md`) for ADR 004: accelerometer-FFT vibration sensing fused with the acoustic estimate.
+  > Hard constraints: Milestone 0 MUST be a device sample-rate probe spike (gate the rest on the measured `LINEAR_ACCELERATION` rate — aliases below ~300 Hz). Reuse the existing SPSC ring + `fft_inplace` + DSP-worker pattern; own radix-2 FFT only (ADR 001), no new heavy deps. phyphox is GPLv3: ideas only, no code copied. Mic stays primary/default; fusion is additive + opt-in + degrades gracefully. Branch + PR + CodeRabbit; never commit to `main`. This is ADR 004. **Plan only — do not implement yet.**
+
+- Open device-validation items still pending: RANSAC params (N_min=20, eps=3%, inlier_frac=0.6, Δv=2 m/s); JNI ref-scope/worker-attach; FFT peak detection — all need a physical arm64 device (C-008).

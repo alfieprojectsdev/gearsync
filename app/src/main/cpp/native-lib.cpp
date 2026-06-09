@@ -74,6 +74,24 @@ static std::atomic<bool>     g_dspRunning{false};
 
 static CalibrationEngine g_calibEngine;
 
+// ─── JVM callback state ──────────────────────────────────────────────────────
+//
+// The DSP worker thread is not JVM-attached at the time a gear-lock fires; it
+// cannot call FindClass or use local refs cached on the JNI startup thread.
+// Solution: cache g_jvm in JNI_OnLoad, then cache a NewGlobalRef jclass and a
+// static jmethodID in startEngine. The worker attaches once on thread start and
+// detaches at exit. (ref: DL-003)
+
+static JavaVM*   g_jvm              = nullptr;
+static jclass    g_engClass         = nullptr;  // NewGlobalRef — freed in stopEngine
+static jmethodID g_onGearCalibrated = nullptr;  // static method; valid for process lifetime
+
+// Cache the JavaVM pointer at library load time. (ref: DL-003)
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
+    g_jvm = vm;
+    return JNI_VERSION_1_6;
+}
+
 // ─── Inline radix-2 Cooley–Tukey FFT ─────────────────────────────────────────
 
 static void fft_inplace(std::vector<std::complex<float>>& a) {
@@ -131,6 +149,18 @@ static void dspWorkerFn() {
     // Thread-local copy of the snapshot — avoids any overlap with the input callback.
     float localSnapshot[FFT_SIZE];
 
+    // Attach the DSP worker to the JVM for the lifetime of the thread.
+    // A per-callback attach/detach would be cheaper in the no-lock case but risks
+    // leaking a detach on early exit; one attach + one detach is simpler and safe.
+    // (ref: DL-003)
+    JNIEnv* dspEnv  = nullptr;
+    bool    attached = false;
+    if (g_jvm) {
+        jint rc  = g_jvm->AttachCurrentThread(&dspEnv, nullptr);
+        attached = (rc == JNI_OK);
+        if (!attached) LOGE("DSP thread: JVM attach failed (%d)", rc);
+    }
+
     while (g_dspRunning.load(std::memory_order_relaxed)) {
         uint32_t w = g_dspWriteSeq.load(std::memory_order_acquire);
         uint32_t r = g_dspReadSeq.load(std::memory_order_relaxed);
@@ -155,9 +185,34 @@ static void dspWorkerFn() {
             int   stableReq = g_stabilityWindowSamples.load(std::memory_order_relaxed);
             int   stable    = g_speedStableCount.load(std::memory_order_relaxed);
 
-            // Only feed Welford when GPS speed has been stable for the configured window.
+            // Only feed learning when GPS speed has been stable for the configured window.
             if (stableReq == 0 || stable >= stableReq) {
-                g_calibEngine.updateWelford(ratio);
+                // Guided capture and passive learning are mutually exclusive per sample.
+                // feedCalibrationSample suppresses passive feeding for the duration of a
+                // capture session. (ref: DL-005, C-001)
+                bool locked = false;
+                int  calibratingGear = -1;
+                if (g_calibEngine.isCalibrating()) {
+                    // Cache the gear under capture BEFORE the feed: a successful lock
+                    // resets m_calibGear to -1, and classifyGear(ratio) would reclassify
+                    // only the last sample — which the asymmetric band can map to -1 or a
+                    // neighbour even on a good fit, misreporting the lock. (ref: DL-003)
+                    calibratingGear = g_calibEngine.calibratingGear();
+                    locked = g_calibEngine.feedCalibrationSample(speed, hz);
+                } else {
+                    g_calibEngine.updateWelford(ratio);
+                }
+
+                // Fire the upcall after feedCalibrationSample returns (m_mutex released),
+                // reporting the exact gear the user calibrated. The order-break guard in
+                // feedCalibrationSample guarantees that gear stays at its index. (ref: DL-003)
+                if (locked && attached && g_engClass && g_onGearCalibrated &&
+                    calibratingGear >= 0) {
+                    dspEnv->CallStaticVoidMethod(g_engClass, g_onGearCalibrated,
+                                                 static_cast<jint>(calibratingGear));
+                    // A failed callback must not crash the DSP thread.
+                    if (dspEnv->ExceptionCheck()) dspEnv->ExceptionClear();
+                }
             }
 
             int gear = g_calibEngine.classifyGear(ratio);
@@ -174,6 +229,9 @@ static void dspWorkerFn() {
             }
         }
     }
+
+    // Detach before thread exit — matches the AttachCurrentThread above. (ref: DL-003)
+    if (attached) g_jvm->DetachCurrentThread();
 }
 
 // ─── Audio input callback (microphone → PCM ring buffer → DSP handoff) ───────
@@ -303,7 +361,20 @@ static void sensorThreadFn() {
 extern "C" {
 
 JNIEXPORT void JNICALL
-Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv*, jclass) {
+Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv* env, jclass cls) {
+    // Global class ref + static method ID are cached here (not in JNI_OnLoad) because
+    // FindClass from JNI_OnLoad uses the system class loader and cannot find app classes.
+    // cls is valid on this call (invoked from app code on the main thread). (ref: DL-003)
+    if (g_engClass == nullptr) {
+        g_engClass = static_cast<jclass>(env->NewGlobalRef(cls));
+        g_onGearCalibrated = env->GetStaticMethodID(g_engClass, "onGearCalibrated", "(I)V");
+        if (!g_onGearCalibrated) {
+            // ProGuard must keep NativeEngine.onGearCalibrated; covered by existing
+            // -keep class ...NativeEngine { *; } rule. (ref: C-007)
+            LOGE("onGearCalibrated method not found -- callback disabled");
+        }
+    }
+
     // Reset ring-buffer head so stale samples from a prior session are not fed
     // into the first DSP snapshot after restart.
     g_pcmHead = 0;
@@ -326,7 +397,7 @@ Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv*, jclass) {
 }
 
 JNIEXPORT void JNICALL
-Java_dev_alfieprojects_gearsync_NativeEngine_stopEngine(JNIEnv*, jclass) {
+Java_dev_alfieprojects_gearsync_NativeEngine_stopEngine(JNIEnv* env, jclass) {
     g_sensorRunning.store(false);
     if (g_sensorThread.joinable()) g_sensorThread.join();
 
@@ -334,6 +405,14 @@ Java_dev_alfieprojects_gearsync_NativeEngine_stopEngine(JNIEnv*, jclass) {
     if (g_dspThread.joinable()) g_dspThread.join();
 
     closeStreams();
+
+    // Release the global ref created in startEngine. The DSP thread is already
+    // joined above, so no callbacks can fire after this point. (ref: DL-003)
+    if (g_engClass) {
+        env->DeleteGlobalRef(g_engClass);
+        g_engClass         = nullptr;
+        g_onGearCalibrated = nullptr;
+    }
     LOGI("Native engine stopped");
 }
 
@@ -409,7 +488,8 @@ Java_dev_alfieprojects_gearsync_NativeEngine_resumeCalibrationState(JNIEnv* env,
 // Serialise current calibration state for SharedPreferences persistence.
 JNIEXPORT jfloatArray JNICALL
 Java_dev_alfieprojects_gearsync_NativeEngine_saveCalibrationState(JNIEnv* env, jclass) {
-    constexpr int LEN = 3 + NUM_GEARS;
+    // LEN = 3 Welford + 5 ratios + 5 pin flags = 13 floats. (ref: DL-002)
+    constexpr int LEN = 3 + NUM_GEARS + NUM_GEARS;
     jfloatArray result = env->NewFloatArray(LEN);
     if (!result) return nullptr;
 
@@ -449,6 +529,29 @@ Java_dev_alfieprojects_gearsync_NativeEngine_setVehicleConfig(JNIEnv*     env,
          static_cast<float>(toleranceLow), static_cast<float>(toleranceHigh),
          static_cast<int>(stabilityWindowSamples),
          static_cast<float>(speedJitterThresholdMps));
+}
+
+// ─── Guided calibration control (called from CalibrationActivity) ────────────
+
+// Delegate to CalibrationEngine.beginGearCalibration. Passive K-Means feeding
+// is suppressed from the DSP worker while a capture is active. (ref: DL-005)
+JNIEXPORT void JNICALL
+Java_dev_alfieprojects_gearsync_NativeEngine_beginGearCalibration(JNIEnv*, jclass, jint gear) {
+    g_calibEngine.beginGearCalibration(static_cast<int>(gear));
+    LOGI("Guided calibration started for gear %d", static_cast<int>(gear));
+}
+
+// Discard captured samples and return to passive mode. (ref: DL-006)
+JNIEXPORT void JNICALL
+Java_dev_alfieprojects_gearsync_NativeEngine_cancelCalibration(JNIEnv*, jclass) {
+    g_calibEngine.cancelCalibration();
+    LOGI("Guided calibration cancelled");
+}
+
+// Returns calibrationProgress() — range [0, 1]; polled by CalibrationActivity at ~10 Hz.
+JNIEXPORT jfloat JNICALL
+Java_dev_alfieprojects_gearsync_NativeEngine_getCalibrationProgress(JNIEnv*, jclass) {
+    return static_cast<jfloat>(g_calibEngine.calibrationProgress());
 }
 
 } // extern "C"

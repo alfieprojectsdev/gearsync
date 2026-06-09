@@ -47,6 +47,17 @@
             android:text="@string/btn_stop"
             android:backgroundTint="@color/button_stop" />
 
+        <!-- Calibrate button: gated in MainActivity.openCalibration() on
+             ShiftAssistantService.isRunning. (ref: DL-004) -->
+        <Button
+            android:id="@+id/btnCalibrate"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="56dp"
+            android:layout_marginStart="8dp"
+            android:text="@string/btn_calibrate"
+            android:backgroundTint="@color/calib_gear_button" />
+
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

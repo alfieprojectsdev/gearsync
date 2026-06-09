@@ -38,6 +38,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnStart).setOnClickListener { checkAndStart() }
         findViewById<Button>(R.id.btnStop).setOnClickListener  { stopShiftService() }
+        findViewById<Button>(R.id.btnCalibrate).setOnClickListener { openCalibration() }
     }
 
     private fun checkAndStart() {
@@ -57,5 +58,16 @@ class MainActivity : AppCompatActivity() {
     private fun stopShiftService() {
         stopService(Intent(this, ShiftAssistantService::class.java))
         Toast.makeText(this, R.string.service_stopped, Toast.LENGTH_SHORT).show()
+    }
+
+    // Guard against opening CalibrationActivity when the service is not running:
+    // NativeEngine.beginGearCalibration would silently no-op and the UI would
+    // show no progress. (ref: DL-004)
+    private fun openCalibration() {
+        if (!ShiftAssistantService.isRunning) {
+            Toast.makeText(this, R.string.calib_service_not_running, Toast.LENGTH_LONG).show()
+            return
+        }
+        startActivity(Intent(this, CalibrationActivity::class.java))
     }
 }

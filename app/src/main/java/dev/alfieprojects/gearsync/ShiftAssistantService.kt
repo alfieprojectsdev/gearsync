@@ -34,6 +34,7 @@ class ShiftAssistantService : Service() {
         NativeEngine.startEngine()
         applyVehicleConfig()
         restoreCalibrationState()
+        isRunning = true
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -46,6 +47,7 @@ class ShiftAssistantService : Service() {
         fusedLocationClient.removeLocationUpdates(locationCallback)
         persistCalibrationState()
         NativeEngine.stopEngine()
+        isRunning = false
         super.onDestroy()
     }
 
@@ -136,7 +138,13 @@ class ShiftAssistantService : Service() {
         private const val NOTIFICATION_ID        = 1
         private const val CHANNEL_ID             = "gearsync_fg"
         private const val PREFS_NAME             = "gearsync_calibration"
-        // Must stay in sync with native: 3 Welford fields + NUM_GEARS (5) gear ratios.
-        private const val CALIBRATION_STATE_LEN  = 8
+        // 3 Welford fields + 5 gear ratios + 5 pin flags = 13 floats.
+        // CalibrationEngine.deserialise accepts the old 8-float format by defaulting
+        // missing pin flags to 0.0 (unpinned). (ref: DL-002, R-002)
+        private const val CALIBRATION_STATE_LEN  = 13
+
+        /** True while the service is in the created-and-not-yet-destroyed state.
+         *  Read by MainActivity to gate the "Calibrate" button. */
+        @Volatile var isRunning: Boolean = false
     }
 }

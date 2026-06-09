@@ -70,7 +70,7 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 | `saveCalibrationState(): FloatArray` | C++→Kt | Service.onDestroy | once |
 | `setVehicleConfig(FloatArray kSeeds, …)` | Kt→C++ | startup, from VehicleConfig | once |
 
-7 externals in `NativeEngine.kt` must match 7 `Java_dev_alfieprojects_gearsync_NativeEngine_*` exports in `native-lib.cpp` (mismatch = UnsatisfiedLinkError). State array (8 floats): `[n, mean, m2, ratio0…ratio4]` → SharedPreferences (no Room/SQLite). `getVUMeterState` returns `[needlePos, dominantHz, speedMps, gear(1-based,0=unknown), confidence]`. JNI externals need `@JvmStatic`; `NativeEngine` kept by `proguard-rules.pro`.
+10 externals in `NativeEngine.kt` must match 10 `Java_dev_alfieprojects_gearsync_NativeEngine_*` exports in `native-lib.cpp` (mismatch = UnsatisfiedLinkError), plus the C++→Kt `onGearCalibrated` upcall. State array (13 floats): `[n, mean, m2, ratio0…ratio4, pin0…pin4]` → SharedPreferences (no Room/SQLite); `deserialise` still loads the legacy 8-float blob, defaulting pin flags to unpinned. `getVUMeterState` returns `[needlePos, dominantHz, speedMps, gear(1-based,0=unknown), confidence]`. JNI externals need `@JvmStatic`; `NativeEngine` kept by `proguard-rules.pro`.
 
 ## Conventions
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Guided-calibration UI colors. Kept in a separate file from colors.xml so the
+  VU-meter palette (owned/revised elsewhere) is not touched. zone_* mirror the
+  VU-meter zone colors for visual consistency. (ref: DL-004)
+-->
+<resources>
+    <color name="calib_text_primary">#FFFFFF</color>
+    <color name="calib_gear_button">#2980B9</color>
+    <color name="calib_ring_track">#333355</color>
+    <color name="zone_lug">#3498DB</color>
+    <color name="zone_optimal">#27AE60</color>
+    <color name="zone_redline">#E74C3C</color>
+</resources>
