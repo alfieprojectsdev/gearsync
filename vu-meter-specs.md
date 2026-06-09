@@ -6,10 +6,10 @@ Refactor `VUMeterView.kt` from a radial/needle dial into a high-visibility, hori
 
 ## 2. Architectural Impact & JNI Alignment
 
-The native JNI payload from C++ (`getVUMeterState(): FloatArray`) remains structurally unchanged to preserve the lock-free real-time DSP pipeline. `VUMeterView` will ingest the 5-float state array:
+The native JNI payload from C++ (`getVUMeterState(): FloatArray`) remains structurally unchanged to preserve the lock-free real-time DSP pipeline. `VUMeterView` ingests the core 5-float state, with an optional 6th `shiftDetected` flag (`1.0` = shift event pending, cleared on read) when present:
 
 
-$$\text{state} = [ \text{needlePos}, \text{dominantHz}, \text{speedMps}, \text{gear}, \text{confidence} ]$$
+$$\text{state} = [ \text{needlePos}, \text{dominantHz}, \text{speedMps}, \text{gear}, \text{confidence}, (\text{optional } \text{shiftDetected}) ]$$
 
 * **`needlePos` ($[0.0, 1.0]$):** Re-mapped from a radial angle to a horizontal fill percentage across the segmented bars.
 * **`gear` ($0-5$):** Rendered as a massive, high-contrast digital glyph overlaid on the center of the VU meter for instantaneous glanceability.
@@ -26,7 +26,7 @@ Instead of a continuous line or a sweep needle, the meter will draw **24 distinc
 * **Segments 9–16 (33% to 66%):** Optimal Zone $\rightarrow$ Vibrant Emerald Green.
 * **Segments 17–24 (66% to 100%):** Shift/Redline Zone $\rightarrow$ High-Intensity Amber/Red.
 
-```
+```text
 +-------------------------------------------------------------+
 |  [ GEAR 2 ]                                                 |
 |  ||||||||        ||||||||        ||||||||                   |
