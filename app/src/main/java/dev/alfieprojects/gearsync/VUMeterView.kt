@@ -4,29 +4,16 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.View
 import kotlin.math.PI
-import kotlin.math.cos
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Analog VU-meter needle view driven by native C++ state at 60 FPS.
- *
- * Three arc zones sweep from 135° (bottom-left) to 45° (top-right), clockwise,
- * covering SWEEP_ANGLE = 270° in Android's Canvas coordinate system (0° = east):
- *   Lugging   0 %–33 %   blue
- *   Optimal  33 %–66 %   green
- *   Redline  66 %–100 %  red
- *
- * Visual feedback features:
- * - Arc zone brightness scales with calibration confidence (dim until locked in).
- * - A white gear-change flash ring fades out over ~400 ms when a shift is detected.
- * - Stability indicator: needle is drawn dimmer while GPS speed is not yet stable.
+ * Horizontal segmented VU meter driven by native C++ state at 60 FPS.
+ * The native payload remains [needlePos, dominantHz, speedMps, gear, confidence, shiftDetected].
  */
 class VUMeterView @JvmOverloads constructor(
     context: Context,
@@ -36,58 +23,44 @@ class VUMeterView @JvmOverloads constructor(
 
     // Raw state from native engine
     private var needlePos      = 0f   // 0.0 … 1.0
-    private var dominantHz     = 0f
-    private var speedMps       = 0f
     private var gear           = 0    // 1-based, 0 = uncalibrated
-    private var confidence     = 0f
     private var shiftDetected  = false
+    private var gearLabel      = NEUTRAL_LABEL
 
-    // Smooth needle using exponential moving average to avoid jitter
+    // Smooth fill using exponential moving average to avoid jitter.
     private var smoothNeedle   = 0f
     private val smoothAlpha    = 0.18f
 
-    // Gear-change flash — decays each frame at 60 FPS (~400 ms at alpha 255)
+    // Gear-change flash outlines the active bars and decays over ~400 ms.
     private var flashAlpha     = 0f                   // 0.0 … 255.0
     private val FLASH_DECAY    = 255f / (60f * 0.4f)  // fade in 0.4 s
 
-    // Arc geometry: sweep from START_ANGLE for SWEEP_ANGLE degrees
-    private val START_ANGLE    = 135f
-    private val SWEEP_ANGLE    = 270f
-    private val ARC_WIDTH      = 28f
+    private val lugSegmentColor     = context.getColor(R.color.vu_lug_segment)
+    private val optSegmentColor     = context.getColor(R.color.vu_opt_segment)
+    private val shiftSegmentColor   = context.getColor(R.color.vu_shift_segment)
+    private val inactiveSegmentColor = context.getColor(R.color.vu_inactive_segment)
+    private val lugAmbientColor     = context.getColor(R.color.vu_ambient_lug_base)
+    private val shiftAmbientColor   = context.getColor(R.color.vu_ambient_shift_base)
 
-    private val arcRect        = RectF()
-
-    private val arcPaintLug    = buildPaint(Color.parseColor("#4A90D9"), ARC_WIDTH)
-    private val arcPaintOpt    = buildPaint(Color.parseColor("#27AE60"), ARC_WIDTH)
-    private val arcPaintRed    = buildPaint(Color.parseColor("#E74C3C"), ARC_WIDTH)
-    private val arcPaintBg     = buildPaint(Color.parseColor("#1A1A2E"), ARC_WIDTH)
-
-    private val flashPaint     = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color       = Color.WHITE
-        strokeWidth = ARC_WIDTH * 0.6f
-        style       = Paint.Style.STROKE
-        strokeCap   = Paint.Cap.BUTT
+    private val segmentPaint  = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
     }
-    private val needlePaint    = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color       = Color.WHITE
-        strokeWidth = 5f
-        style       = Paint.Style.STROKE
-        strokeCap   = Paint.Cap.ROUND
-    }
-    private val pivotPaint     = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val flashPaint    = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.FILL
     }
-    private val labelPaint     = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color     = Color.argb(180, 255, 255, 255)
-        textSize  = 36f
+    private val textStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
         textAlign = Paint.Align.CENTER
-    }
-    private val valuePaint     = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color          = Color.WHITE
-        textSize       = 52f
-        textAlign      = Paint.Align.CENTER
         isFakeBoldText = true
+        style = Paint.Style.STROKE
+        strokeWidth = 8f
+    }
+    private val textPaint     = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+        style = Paint.Style.FILL
     }
 
     // ─── 60 FPS loop via Choreographer ───────────────────────────────────────
@@ -98,18 +71,19 @@ class VUMeterView @JvmOverloads constructor(
     private val frameCallback  = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             val state = NativeEngine.getVUMeterState()
-            if (state != null && state.size >= 6) {
+            if (state != null && state.size >= 5) {
                 needlePos     = state[0]
-                dominantHz    = state[1]
-                speedMps      = state[2]
                 gear          = state[3].toInt()
-                confidence    = state[4]
-                shiftDetected = state[5] != 0f
+                shiftDetected = state.size >= 6 && state[5] != 0f
+                gearLabel     = if (gear > 0) {
+                    GEAR_LABELS.getOrElse(gear) { NEUTRAL_LABEL }
+                } else {
+                    NEUTRAL_LABEL
+                }
             }
 
-            smoothNeedle += smoothAlpha * (needlePos - smoothNeedle)
+            smoothNeedle += smoothAlpha * (needlePos.coerceIn(0f, 1f) - smoothNeedle)
 
-            // Latch flash at full brightness on shift event; decay every frame.
             if (shiftDetected) flashAlpha = 255f
             else flashAlpha = max(0f, flashAlpha - FLASH_DECAY)
 
@@ -147,72 +121,102 @@ class VUMeterView @JvmOverloads constructor(
     // ─── Drawing ─────────────────────────────────────────────────────────────
 
     override fun onDraw(canvas: Canvas) {
-        val cx = width  / 2f
-        val cy = height / 2f
-        val r  = min(cx, cy) * 0.82f
+        val fill = smoothNeedle.coerceIn(0f, 1f)
+        val alertFill = needlePos.coerceIn(0f, 1f)
 
-        arcRect.set(cx - r, cy - r, cx + r, cy + r)
+        drawPeripheralWash(canvas, alertFill)
+        drawSegments(canvas, fill)
+        drawGearLabel(canvas)
+    }
 
-        // Background arc
-        canvas.drawArc(arcRect, START_ANGLE, SWEEP_ANGLE, false, arcPaintBg)
-
-        // Zone arcs — dim when confidence is low so the driver can see calibration is still learning.
-        val zoneAlpha = (80 + (confidence * 175f).toInt()).coerceIn(80, 255)
-        val third     = SWEEP_ANGLE / 3f
-        arcPaintLug.alpha = zoneAlpha
-        arcPaintOpt.alpha = zoneAlpha
-        arcPaintRed.alpha = zoneAlpha
-        canvas.drawArc(arcRect, START_ANGLE,           third, false, arcPaintLug)
-        canvas.drawArc(arcRect, START_ANGLE + third,   third, false, arcPaintOpt)
-        canvas.drawArc(arcRect, START_ANGLE + 2*third, third, false, arcPaintRed)
-
-        // Gear-change flash ring — full-circle white arc that fades after a shift event.
-        if (flashAlpha > 0f) {
-            flashPaint.alpha = flashAlpha.toInt()
-            canvas.drawArc(arcRect, START_ANGLE, SWEEP_ANGLE, false, flashPaint)
-        }
-
-        // Needle — use kotlin.math.PI for idiomatic conversion from degrees.
-        val needleAngle = (START_ANGLE + smoothNeedle * SWEEP_ANGLE) * PI / 180.0
-        val nx          = (cx + r * cos(needleAngle)).toFloat()
-        val ny          = (cy + r * sin(needleAngle)).toFloat()
-        val innerR      = r * 0.30f
-        val ix          = (cx + innerR * cos(needleAngle)).toFloat()
-        val iy          = (cy + innerR * sin(needleAngle)).toFloat()
-
-        // Dim needle while engine has no GPS lock or speed is zero.
-        needlePaint.alpha = if (speedMps > 0f) 255 else 100
-        canvas.drawLine(ix, iy, nx, ny, needlePaint)
-
-        // Pivot dot
-        pivotPaint.alpha = needlePaint.alpha
-        canvas.drawCircle(cx, cy, 10f, pivotPaint)
-
-        // Gear number — white when known, muted when uncalibrated.
-        val gearText = if (gear > 0) "GEAR $gear" else "—"
-        valuePaint.alpha = if (gear > 0) 255 else 120
-        canvas.drawText(gearText, cx, cy + r * 0.55f, valuePaint)
-
-        // Hz readout below gear number.
-        val hzText = if (dominantHz > 0f) "${dominantHz.toInt()} Hz" else "···"
-        canvas.drawText(hzText, cx, cy + r * 0.78f, labelPaint)
-
-        // Confidence ring — thin stroke that fills clockwise as K-Means locks in.
-        if (confidence > 0f) {
-            val confPaint = Paint(arcPaintOpt).apply {
-                strokeWidth = 4f
-                alpha       = 140
+    private fun drawPeripheralWash(canvas: Canvas, fill: Float) {
+        when {
+            fill < LUG_END -> {
+                val intensity = (LUG_END - fill) / LUG_END
+                val alpha = (intensity * LUG_MAX_ALPHA).toInt().coerceIn(0, LUG_MAX_ALPHA)
+                canvas.drawColor(withAlpha(lugAmbientColor, alpha))
             }
-            canvas.drawArc(arcRect, START_ANGLE, SWEEP_ANGLE * confidence, false, confPaint)
+            fill > OPT_END -> {
+                val alpha = if (fill > PULSE_START) {
+                    val seconds = System.currentTimeMillis() / 1000.0
+                    val wave = (sin(seconds * TWO_PI * PULSE_HZ) + 1.0) * 0.5
+                    (PULSE_MIN_ALPHA + wave * (PULSE_MAX_ALPHA - PULSE_MIN_ALPHA)).toInt()
+                } else {
+                    val intensity = ((fill - OPT_END) / (PULSE_START - OPT_END)).coerceIn(0f, 1f)
+                    (intensity * SHIFT_RAMP_MAX_ALPHA).toInt()
+                }.coerceIn(0, 255)
+                canvas.drawColor(withAlpha(shiftAmbientColor, alpha))
+            }
         }
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────────────────
+    private fun drawSegments(canvas: Canvas, fill: Float) {
+        val meterWidth = width.toFloat()
+        val meterHeight = height.toFloat()
+        val gap = SEGMENT_GAP_PX
+        val segmentWidth = (meterWidth - gap * (SEGMENT_COUNT - 1)) / SEGMENT_COUNT
+        val top = meterHeight * 0.18f
+        val bottom = meterHeight * 0.72f
+        val activeSegments = (fill * SEGMENT_COUNT + 0.999f).toInt().coerceIn(0, SEGMENT_COUNT)
 
-    private fun buildPaint(color: Int, width: Float) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        this.color       = color
-        this.strokeWidth = width
-        this.style       = Paint.Style.STROKE
-        this.strokeCap   = Paint.Cap.BUTT
+        var left = 0f
+        for (i in 0 until SEGMENT_COUNT) {
+            segmentPaint.color = when {
+                i >= activeSegments -> inactiveSegmentColor
+                i < LUG_SEGMENTS -> lugSegmentColor
+                i < OPT_SEGMENTS -> optSegmentColor
+                else -> shiftSegmentColor
+            }
+            val right = left + segmentWidth
+            canvas.drawRect(left, top, right, bottom, segmentPaint)
+
+            if (flashAlpha > 0f && i < activeSegments && i >= OPT_SEGMENTS) {
+                flashPaint.alpha = (flashAlpha * 0.35f).toInt().coerceIn(0, 90)
+                canvas.drawRect(left, top, right, bottom, flashPaint)
+            }
+
+            left = right + gap
+        }
+    }
+
+    private fun drawGearLabel(canvas: Canvas) {
+        val textSize = height * 0.38f
+        val baseline = height * 0.56f
+        textStrokePaint.textSize = textSize
+        textPaint.textSize = textSize
+        textPaint.alpha = if (gear > 0) 255 else 135
+        canvas.drawText(gearLabel, width / 2f, baseline, textStrokePaint)
+        canvas.drawText(gearLabel, width / 2f, baseline, textPaint)
+    }
+
+    private fun withAlpha(color: Int, alpha: Int): Int {
+        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+    }
+
+    private companion object {
+        private const val SEGMENT_COUNT = 24
+        private const val LUG_SEGMENTS = 8
+        private const val OPT_SEGMENTS = 16
+        private const val SEGMENT_GAP_PX = 6f
+
+        private const val LUG_END = 0.33f
+        private const val OPT_END = 0.66f
+        private const val PULSE_START = 0.85f
+        private const val LUG_MAX_ALPHA = 89
+        private const val SHIFT_RAMP_MAX_ALPHA = 64
+        private const val PULSE_MIN_ALPHA = 38
+        private const val PULSE_MAX_ALPHA = 128
+        private const val PULSE_HZ = 4.0
+        private const val TWO_PI = 2.0 * PI
+
+        private const val NEUTRAL_LABEL = "N/??"
+        private val GEAR_LABELS = arrayOf(
+            NEUTRAL_LABEL,
+            "G1",
+            "G2",
+            "G3",
+            "G4",
+            "G5"
+        )
     }
 }
