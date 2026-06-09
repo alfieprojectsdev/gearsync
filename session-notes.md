@@ -174,3 +174,34 @@ b12db0a Merge remote-tracking branch 'origin/claude/focused-turing-1xGm4'
 - ⏳ `onGearCalibrated(int)` callback — specified in plan, not yet coded.
 - ⏳ Test FFT peak detection on physical arm64 device.
 - Note: pre-existing uncommitted edits to `VUMeterView.kt`, `activity_main.xml`, `colors.xml` + untracked `vu-meter-specs.md` — not mine, left alone.
+
+---
+
+## Session 2026-06-09 — guided calibration implemented + VU redesign landed + PR workflow
+
+Adopted a **branch + PR + CodeRabbit** flow (never commit to `main`). Helper scripts live in `scripts/` (untracked; `gh pr create`/merge are sandbox-blocked, so they're run via `!`).
+
+### Shipped
+- **Guided calibration implemented** from `plans/guided-calibration-implementation-plan.md` (all 4 milestones): RANSAC slope fit + capture state machine + pin flags + 8→13-float persistence migration (legacy back-compat); `onGearCalibrated` DSP-worker JVM upcall (JNI_OnLoad JavaVM cache + startEngine global refs, fired outside `m_mutex`); `CalibrationActivity` + top-level `ProgressRingView`; `MainActivity` Calibrate button. Host tests `cpp/test/test_ransac_host.cpp` — **8/8 pass** (no NDK).
+- **VU meter redesign** (codex's `vu-meter-specs.md`) was already implemented in the working tree; landed it. Calibration deliberately avoided codex-owned `colors.xml`/`VUMeterView.kt` — calib colors isolated in `colors_calibration.xml`; only shared file is `activity_main.xml` (+Calibrate button).
+
+### PR board (repo: `alfieprojectsdev/gearsync`, CodeRabbit on)
+- **#2** VU redesign → `main` — **MERGED** (merge commit, to keep stacked diff clean).
+- **#4** `chore` gradlew.bat CRLF + `.gitattributes` → `main` — **MERGED** (squash).
+- **#3** guided calibration → `main` (retargeted from the VU branch via REST after `gh pr edit` hit a gh projects-classic bug) — **OPEN, mergeable**, diff is calibration-only. All **7 CodeRabbit findings addressed** in `e5d765f` (Majors: unbounded capture/throttle; pin-by-index not sorted-slot; cache `calibratingGear()` for the upcall; re-enable gear buttons after a lock). CR won't re-review a stacked PR's already-seen commits — retarget-to-main was the fix.
+- **#5** docs ADR 004 (accel-FFT sensor fusion note) → `main` — **OPEN**.
+
+### Key decisions / gotchas (for resume)
+- `ProgressRingView` is **top-level**, not the plan's inner class — `LayoutInflater` can't construct an inner class from XML.
+- Pins bind to **gear index**, never sorted-ratio slot (CR Major) — `feedCalibrationSample` no longer re-sorts (order-guard already keeps descending); K-Means keeps pinned slots fixed, sorts only unpinned + monotonic repair.
+- Persisted state = **13 floats** `[n, mean, m2, ratio0..4, pin0..4]`; `deserialise` still loads legacy 8-float (pins→0). 10 JNI externals ↔ 10 exports + `onGearCalibrated` upcall.
+- Stacked PRs don't auto-review (CR base must = default branch). `phyphox-android` cloned at `/home/finch/repos/phyphox-android`, symlinked `research/phyphox-android` (in `.git/info/exclude`), **GPLv3 — ideas only**.
+
+### Next / handed off
+- **Merge #3** (and #5) when CR is green.
+- **ADR 004 implementation plan → handed to Codex** (free tier). Probe-first. Paste brief:
+
+  > Read `accel-fft-sensor-fusion-design.md`, `adr.md` (ADR 001/002), and `native-lib.cpp` (`findDominantHz`, `dspWorkerFn`, the PCM SPSC ring). Draft an IMPLEMENTATION PLAN (milestones, like `guided-calibration-implementation-plan.md`) for ADR 004: accelerometer-FFT vibration sensing fused with the acoustic estimate.
+  > Hard constraints: Milestone 0 MUST be a device sample-rate probe spike (gate the rest on the measured `LINEAR_ACCELERATION` rate — aliases below ~300 Hz). Reuse the existing SPSC ring + `fft_inplace` + DSP-worker pattern; own radix-2 FFT only (ADR 001), no new heavy deps. phyphox is GPLv3: ideas only, no code copied. Mic stays primary/default; fusion is additive + opt-in + degrades gracefully. Branch + PR + CodeRabbit; never commit to `main`. This is ADR 004. **Plan only — do not implement yet.**
+
+- Open device-validation items still pending: RANSAC params (N_min=20, eps=3%, inlier_frac=0.6, Δv=2 m/s); JNI ref-scope/worker-attach; FFT peak detection — all need a physical arm64 device (C-008).
