@@ -6,4 +6,19 @@
     <string name="service_started">GearSync started</string>
     <string name="service_stopped">GearSync stopped</string>
     <string name="permissions_required">Permissions required: %1$s</string>
+
+    <!-- Guided calibration strings. calib_capturing uses %1$d = 1-based gear number. -->
+    <string name="btn_calibrate">Calibrate</string>
+    <string name="btn_cancel_calib">Cancel</string>
+    <string name="calib_pick_gear">Pick a gear to calibrate</string>
+    <string name="calib_capturing">Hold gear %1$d — vary speed, steady throttle</string>
+    <string name="calib_locked">Gear %1$d locked</string>
+    <string name="calib_lock_failed">Calibration failed — gear order conflict. Try again.</string>
+    <string name="calib_permissions_required">RECORD_AUDIO and location permissions required</string>
+    <string name="calib_service_not_running">Start the GearSync service first, then open Calibrate.</string>
+    <string name="gear_label_1">1</string>
+    <string name="gear_label_2">2</string>
+    <string name="gear_label_3">3</string>
+    <string name="gear_label_4">4</string>
+    <string name="gear_label_5">5</string>
 </resources>

@@ -31,6 +31,14 @@
             </intent-filter>
         </activity>
 
+        <!-- CalibrationActivity: not exported; launched only from MainActivity.
+             android:exported="false" required since targetSdk >= 31. (ref: DL-004) -->
+        <activity
+            android:name=".CalibrationActivity"
+            android:exported="false"
+            android:label="@string/btn_calibrate"
+            android:windowSoftInputMode="stateHidden" />
+
         <service
             android:name=".ShiftAssistantService"
             android:exported="false"
