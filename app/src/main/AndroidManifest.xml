@@ -3,6 +3,10 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Android 12+ (API 31+) caps sensor sampling at 200 Hz without this normal,
+         install-time permission. ADR 004 needs ~400 Hz raw accel (Nyquist 200 Hz)
+         to cover the redline firing band unaliased. (ref: M0 probe) -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
