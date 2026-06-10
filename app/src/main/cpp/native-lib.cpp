@@ -456,7 +456,8 @@ static void sensorThreadFn() {
         return;
     }
     // Only now is the probe genuinely live — publish support after success.
-    g_accelRequestedHz.store(minDelayUs > 0 ? 1000000.0f / static_cast<float>(minDelayUs) : 0.0f);
+    const float requestedHz = minDelayUs > 0 ? 1000000.0f / static_cast<float>(minDelayUs) : 0.0f;
+    g_accelRequestedHz.store(std::isfinite(requestedHz) ? requestedHz : 0.0f);
     g_accelSupported.store(1);
     updateVibrationFusionDiagnostics();
     LOGI("Sensor thread running: raw ACCELEROMETER at %d µs (min-delay)", minDelayUs);
