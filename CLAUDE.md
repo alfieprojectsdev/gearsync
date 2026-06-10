@@ -65,12 +65,12 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 |---|---|---|---|
 | `startEngine()` / `stopEngine()` | Kt→C++ | Service create/destroy | once |
 | `updateGpsSpeed(float)` | Kt→C++ | Service location cb | 1 Hz |
-| `getVUMeterState(): FloatArray` | C++→Kt | VUMeterView Choreographer | 60 Hz |
+| `nativeVUMeterState(): FloatArray` | C++→Kt | VUMeterView (via `getVUMeterState` wrapper) | 60 Hz |
 | `resumeCalibrationState(FloatArray)` | Kt→C++ | Service.onCreate | once |
 | `saveCalibrationState(): FloatArray` | C++→Kt | Service.onDestroy | once |
 | `setVehicleConfig(FloatArray kSeeds, …)` | Kt→C++ | startup, from VehicleConfig | once |
 
-10 externals in `NativeEngine.kt` must match 10 `Java_dev_alfieprojects_gearsync_NativeEngine_*` exports in `native-lib.cpp` (mismatch = UnsatisfiedLinkError), plus the C++→Kt `onGearCalibrated` upcall. State array (13 floats): `[n, mean, m2, ratio0…ratio4, pin0…pin4]` → SharedPreferences (no Room/SQLite); `deserialise` still loads the legacy 8-float blob, defaulting pin flags to unpinned. `getVUMeterState` returns `[needlePos, dominantHz, speedMps, gear(1-based,0=unknown), confidence]`. JNI externals need `@JvmStatic`; `NativeEngine` kept by `proguard-rules.pro`.
+10 externals in `NativeEngine.kt` must match 10 `Java_dev_alfieprojects_gearsync_NativeEngine_*` exports in `native-lib.cpp` (mismatch = UnsatisfiedLinkError), plus the C++→Kt `onGearCalibrated` upcall. State array (13 floats): `[n, mean, m2, ratio0…ratio4, pin0…pin4]` → SharedPreferences (no Room/SQLite); `deserialise` still loads the legacy 8-float blob, defaulting pin flags to unpinned. The native export is `nativeVUMeterState`; Kotlin `getVUMeterState` is a thin wrapper that returns synthetic `DebugSweep` frames in the `sweep` build type (`BuildConfig.VU_SWEEP`) and proxies the native call otherwise. It returns `[needlePos, dominantHz, speedMps, gear(1-based,0=unknown), confidence, shiftDetected]`. JNI externals need `@JvmStatic`; `NativeEngine` kept by `proguard-rules.pro`.
 
 ## Conventions
 

@@ -31,6 +31,8 @@ android {
     buildFeatures {
         // Required to consume Oboe's native AAR via prefab
         prefab true
+        // Required for the custom VU_SWEEP buildConfigField (AGP 8.x: opt-in)
+        buildConfig true
     }
 
     externalNativeBuild {
@@ -49,9 +51,24 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Production-equivalent VU path: proxy the native engine.
+            buildConfigField 'boolean', 'VU_SWEEP', 'false'
+        }
         release {
             minifyEnabled   true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            buildConfigField 'boolean', 'VU_SWEEP', 'false'
+        }
+        // `sweep`: throwaway visual-demo build. Ignores mic/GPS/sensors and feeds
+        // VUMeterView a synthetic lug→redline ramp (DebugSweep) so the segmented
+        // bar can be eyeballed on-device without driving. Build: ./gradlew assembleSweep
+        sweep {
+            initWith debug
+            applicationIdSuffix '.sweep'
+            versionNameSuffix   '-sweep'
+            buildConfigField 'boolean', 'VU_SWEEP', 'true'
+            matchingFallbacks = ['debug']
         }
     }
 }

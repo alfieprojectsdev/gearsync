@@ -13,11 +13,22 @@ object NativeEngine {
     @JvmStatic external fun updateGpsSpeed(speed: Float)
 
     /**
-     * Returns [needlePos, dominantHz, speedMps, gear (1-based, 0=unknown),
-     *          confidence, shiftDetected (1.0 = event pending, then cleared)]
-     * Called from VUMeterView at 60 FPS.
+     * Native engine VU payload:
+     * [needlePos, dominantHz, speedMps, gear (1-based, 0=unknown),
+     *  confidence, shiftDetected (1.0 = event pending, then cleared)].
      */
-    @JvmStatic external fun getVUMeterState(): FloatArray?
+    @JvmStatic external fun nativeVUMeterState(): FloatArray?
+
+    /**
+     * VU state consumed by VUMeterView at 60 FPS. Normally proxies the native
+     * engine; in the `sweep` build type (BuildConfig.VU_SWEEP) it returns a
+     * synthetic ramp from [DebugSweep] so a built APK self-demos the meter with
+     * no mic / GPS / sensors. The flag is false in debug and release builds, so
+     * production behavior is unchanged. (see app/build.gradle `sweep` build type)
+     */
+    @JvmStatic
+    fun getVUMeterState(): FloatArray? =
+        if (BuildConfig.VU_SWEEP) DebugSweep.nextFrame() else nativeVUMeterState()
 
     /**
      * Restore Welford + gear-ratio state from a previous session.
