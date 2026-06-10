@@ -205,3 +205,24 @@ Adopted a **branch + PR + CodeRabbit** flow (never commit to `main`). Helper scr
   > Hard constraints: Milestone 0 MUST be a device sample-rate probe spike (gate the rest on the measured `LINEAR_ACCELERATION` rate — aliases below ~300 Hz). Reuse the existing SPSC ring + `fft_inplace` + DSP-worker pattern; own radix-2 FFT only (ADR 001), no new heavy deps. phyphox is GPLv3: ideas only, no code copied. Mic stays primary/default; fusion is additive + opt-in + degrades gracefully. Branch + PR + CodeRabbit; never commit to `main`. This is ADR 004. **Plan only — do not implement yet.**
 
 - Open device-validation items still pending: RANSAC params (N_min=20, eps=3%, inlier_frac=0.6, Δv=2 m/s); JNI ref-scope/worker-attach; FFT peak detection — all need a physical arm64 device (C-008).
+
+---
+
+## Session 2026-06-10 — PR board cleared + sweep build + icon redesign
+
+Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox-blocked, so all `gh` runs via `!` and helper scripts in `scripts/`.
+
+### Shipped
+- **#3 guided calibration** — CR re-review (2 new Majors) fixed in `1c0623f`: K-Means assignment now absorbs pinned-ratio samples into the pinned gear so unpinned neighbours aren't dragged; pin-aware farthest-first init pre-places pinned slots; `deserialise` hardened against an unsafe `int` cast (NaN/overflow/non-integer `n`). `test_pin_survives_kmeans` strengthened (asserts neighbours stay ≈15/≈8). Host tests **8/8**. **Merged** (`844cb14`).
+- **#5 ADR 004 docs note** — **merged** (`a59e65e`).
+- **#6 `sweep` build type** (branch `debug/vu-sweep`, `ec56e1c`) — **merged** (`0ed95a7`). On-device VU preview with no mic/GPS/sensors. JNI export renamed `getVUMeterState`→`nativeVUMeterState`; Kotlin `getVUMeterState()` is now a wrapper returning `DebugSweep.nextFrame()` when `BuildConfig.VU_SWEEP` (true only in the `sweep` build type; false in debug/release → prod unchanged). Needed `buildFeatures.buildConfig true` (AGP 8.x). **VUMeterView untouched** (codex-owned). Built clean: `./gradlew assembleSweep` → `app/build/outputs/apk/sweep/app-sweep.apk` (9.8 MB). `DebugSweep` ramps needle 0→1, cycles G1→G5, flashes each redline.
+- **#7 launcher icon redesign** (branch `feat/app-icon`, `d0e69cc`) — `ic_launcher_foreground.xml` swapped from the retired needle-gauge to ascending segmented VU bars (lug-cyan `#00D4FF` / opt-green `#00E676` / shift-red `#FF1744`). **Merge pending** (`gh pr merge 7`); CR rate-limited then never re-reviewed — merged as self-reviewed (trivial single-file adaptive-vector, no logic/build risk).
+
+### Gotchas / decisions
+- Launcher icons already existed (Jun 8) — the CLAUDE.md "must add mipmap icons to build" open item was **stale**; build was never actually blocked. #7 is a cosmetic upgrade, not a fix.
+- Sweep injects at `NativeEngine`, never `VUMeterView`, to respect codex ownership; `sweep` uses `applicationIdSuffix '.sweep'` so it installs alongside a normal build. JNI 10↔10 parity preserved (one export renamed, not added).
+- CodeRabbit **fair-usage rate limit** can silently skip a review (only a warning comment, yet the status check still shows SUCCESS) — verify an actual walkthrough exists, not just a green check, before trusting "CR-clean".
+
+### Next
+- **ADR 004 accel-FFT** still device-gated at **M0** (≥300 Hz `LINEAR_ACCELERATION` probe on physical arm64) before any Codex handoff. Codex's plan is at `plans/accel-fft-sensor-fusion-implementation-plan.md` (M0–M6, sound). Two pre-handoff plan gaps: restate the JNI 10↔10 parity invariant; decide same-vs-second DSP worker for the accel path.
+- Device-validation items from the 2026-06-09 entry still open (C-008).
