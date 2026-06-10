@@ -29,7 +29,14 @@ static constexpr float MIN_ENGINE_HZ      = 20.0f;
 static constexpr float MAX_ENGINE_HZ      = 250.0f;
 static constexpr float MIN_SPEED_MPS      = 1.0f;         // ignore GPS jitter below 1 m/s
 static constexpr float SHIFT_ACCEL_THRESH = 4.0f;         // m/s² spike → visual shift flash
-static constexpr int   SENSOR_US          = 10000;        // 100 Hz
+static constexpr int   SENSOR_US          = 10000;        // 100 Hz (fallback if min-delay unknown)
+
+// ─── ADR 004 M0 in-app accel-rate probe ──────────────────────────────────────
+// Requests raw ACCELEROMETER at fastest delivery and measures the rate/jitter our
+// own ASensorEventQueue path actually achieves (phyphox bench read 400 Hz; this
+// confirms our code path lands there too). Gate for fusion is >= ~300 Hz. (DL-001/007/009)
+static constexpr float ACCEL_RATE_GATE_HZ  = 300.0f;
+static constexpr int   ACCEL_PROBE_WINDOW  = 512;         // intervals per published stats window
 
 // ─── Shared state (atomic where possible) ────────────────────────────────────
 
@@ -38,6 +45,14 @@ static std::atomic<float>    g_dominantHz{0.0f};          // last FFT peak
 static std::atomic<float>    g_needlePos{0.0f};           // 0.0 (lug) … 1.0 (redline)
 static std::atomic<int>      g_currentGear{-1};           // 0-based gear index, -1 = unknown
 static std::atomic<bool>     g_shiftDetected{false};      // set by sensor thread; consumed by VU meter
+
+// ─── ADR 004 M0 probe stats (written by sensor thread, read via JNI diagnostic) ─
+static std::atomic<float>    g_accelEffHz{0.0f};          // measured effective rate, Hz
+static std::atomic<float>    g_accelMinIntervalMs{0.0f};  // min inter-arrival in last window
+static std::atomic<float>    g_accelMaxIntervalMs{0.0f};  // max inter-arrival in last window
+static std::atomic<float>    g_accelJitterMs{0.0f};       // stddev of inter-arrival in last window
+static std::atomic<float>    g_accelSampleCount{0.0f};    // cumulative samples seen
+static std::atomic<int>      g_accelSupported{-1};        // -1 unknown, 0 unsupported, 1 supported
 
 // ─── Vehicle config (set once via setVehicleConfig JNI, then read-only) ──────
 
@@ -300,14 +315,46 @@ static void closeStreams() {
     }
 }
 
-// ─── Sensor thread (LINEAR_ACCELERATION at 100 Hz) ───────────────────────────
-// Detects shift events (acceleration spike) and sets g_shiftDetected for the
-// VU meter to display a visual flash — no audio output involved.
+// ─── Sensor thread (raw ACCELEROMETER, fastest rate) ─────────────────────────
+// ADR 004 M0: reads raw ACCELEROMETER (not the fused LINEAR_ACCELERATION, which
+// is often rate-throttled — DL-007) at the fastest delivery the device allows,
+// measures the effective rate/jitter our own queue path achieves, and still
+// drives shift-event detection. Gravity is removed for spike detection via a
+// slow EMA baseline; the future vibration FFT removes it as a DC term.
 
 static ASensorManager*    g_sensorManager    = nullptr;
 static ASensorEventQueue* g_sensorEventQueue = nullptr;
 static std::thread        g_sensorThread;
 static std::atomic<bool>  g_sensorRunning{false};
+
+// Publish one window of inter-arrival statistics from worker-local accumulators.
+static void publishAccelStats(const float* intervalsMs, int count, float cumulativeSamples) {
+    if (count <= 0) return;
+    float sum = 0.0f, mn = intervalsMs[0], mx = intervalsMs[0];
+    for (int i = 0; i < count; ++i) {
+        const float v = intervalsMs[i];
+        sum += v;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+    const float mean = sum / static_cast<float>(count);
+    float var = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        const float d = intervalsMs[i] - mean;
+        var += d * d;
+    }
+    var /= static_cast<float>(count);
+    const float effHz = (mean > 0.0f) ? 1000.0f / mean : 0.0f;
+
+    g_accelEffHz.store(effHz);
+    g_accelMinIntervalMs.store(mn);
+    g_accelMaxIntervalMs.store(mx);
+    g_accelJitterMs.store(std::sqrt(var));
+    g_accelSampleCount.store(cumulativeSamples);
+    LOGI("Accel probe: %.1f Hz (gate %.0f → %s), interval mean=%.2f min=%.2f max=%.2f jitter=%.2f ms",
+         effHz, ACCEL_RATE_GATE_HZ, effHz >= ACCEL_RATE_GATE_HZ ? "PASS" : "LOW",
+         mean, mn, mx, std::sqrt(var));
+}
 
 static void sensorThreadFn() {
     ALooper* looper = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
@@ -315,40 +362,76 @@ static void sensorThreadFn() {
     g_sensorManager = ASensorManager_getInstanceForPackage("dev.alfieprojects.gearsync");
     if (!g_sensorManager) {
         LOGE("ASensorManager unavailable");
+        g_accelSupported.store(0);
         g_sensorRunning.store(false);  // reflect actual stopped state
         return;
     }
 
     const ASensor* accel = ASensorManager_getDefaultSensor(
-            g_sensorManager, ASENSOR_TYPE_LINEAR_ACCELERATION);
+            g_sensorManager, ASENSOR_TYPE_ACCELEROMETER);
     if (!accel) {
-        LOGE("LINEAR_ACCELERATION sensor unavailable");
+        LOGE("ACCELEROMETER sensor unavailable");
+        g_accelSupported.store(0);
         g_sensorRunning.store(false);  // reflect actual stopped state
         return;
     }
+    g_accelSupported.store(1);
 
     g_sensorEventQueue = ASensorManager_createEventQueue(
             g_sensorManager, looper, ALOOPER_EVENT_INPUT, nullptr, nullptr);
 
+    // Request the fastest delivery the sensor advertises; fall back to SENSOR_US.
+    int minDelayUs = ASensor_getMinDelay(accel);
+    if (minDelayUs <= 0) minDelayUs = SENSOR_US;
     ASensorEventQueue_enableSensor(g_sensorEventQueue, accel);
-    ASensorEventQueue_setEventRate(g_sensorEventQueue, accel, SENSOR_US);
-    LOGI("Sensor thread running at %d µs", SENSOR_US);
+    ASensorEventQueue_setEventRate(g_sensorEventQueue, accel, minDelayUs);
+    LOGI("Sensor thread running: raw ACCELEROMETER at %d µs (min-delay)", minDelayUs);
+
+    // Worker-local rate-probe accumulators (no heap alloc in the loop).
+    float    intervalsMs[ACCEL_PROBE_WINDOW];
+    int      intervalCount   = 0;
+    int64_t  prevTs          = 0;
+    float    cumulativeCount = 0.0f;
+    float    gravityEma      = 9.81f;   // slow baseline ≈ gravity, removed for spike detect
 
     ASensorEvent events[8];
     while (g_sensorRunning.load()) {
         int n = ASensorEventQueue_getEvents(g_sensorEventQueue, events, 8);
         if (n > 0) {
             for (int i = 0; i < n; ++i) {
-                float ax = events[i].acceleration.x;
-                float ay = events[i].acceleration.y;
-                float az = events[i].acceleration.z;
-                if (std::sqrt(ax*ax + ay*ay + az*az) > SHIFT_ACCEL_THRESH) {
+                const float ax = events[i].acceleration.x;
+                const float ay = events[i].acceleration.y;
+                const float az = events[i].acceleration.z;
+                const float mag = std::sqrt(ax*ax + ay*ay + az*az);
+
+                // Gravity-removed spike detection (raw accel includes ~9.81 g). (C-007)
+                gravityEma += 0.02f * (mag - gravityEma);
+                if (std::fabs(mag - gravityEma) > SHIFT_ACCEL_THRESH) {
                     g_shiftDetected.store(true);
+                }
+
+                // Rate probe: accumulate inter-arrival intervals from event timestamps.
+                const int64_t ts = events[i].timestamp;  // ns, monotonic
+                if (prevTs != 0 && ts > prevTs) {
+                    if (intervalCount < ACCEL_PROBE_WINDOW) {
+                        intervalsMs[intervalCount++] =
+                            static_cast<float>(ts - prevTs) / 1.0e6f;
+                    }
+                }
+                prevTs = ts;
+                cumulativeCount += 1.0f;
+
+                if (intervalCount >= ACCEL_PROBE_WINDOW) {
+                    publishAccelStats(intervalsMs, intervalCount, cumulativeCount);
+                    intervalCount = 0;
                 }
             }
         }
         ALooper_pollOnce(2, nullptr, nullptr, nullptr);
     }
+
+    // Flush any partial window so a short session still reports a rate.
+    publishAccelStats(intervalsMs, intervalCount, cumulativeCount);
 
     ASensorEventQueue_disableSensor(g_sensorEventQueue, accel);
     ASensorManager_destroyEventQueue(g_sensorManager, g_sensorEventQueue);
@@ -461,6 +544,26 @@ Java_dev_alfieprojects_gearsync_NativeEngine_nativeVUMeterState(JNIEnv* env, jcl
         static_cast<float>(gear + 1),  // 1-based; 0 = unknown
         conf,
         shift
+    };
+    env->SetFloatArrayRegion(result, 0, 6, buf);
+    return result;
+}
+
+// ADR 004 M0 diagnostic. Returns float[6]:
+//   [effectiveHz, minIntervalMs, maxIntervalMs, jitterMs, cumulativeSamples,
+//    supported (1 yes / 0 no / -1 unknown)]
+// effectiveHz >= 300 means our own raw-ACCELEROMETER path clears the fusion gate. (DL-009)
+JNIEXPORT jfloatArray JNICALL
+Java_dev_alfieprojects_gearsync_NativeEngine_nativeAccelProbeStats(JNIEnv* env, jclass) {
+    jfloatArray result = env->NewFloatArray(6);
+    if (!result) return nullptr;
+    float buf[6] = {
+        g_accelEffHz.load(),
+        g_accelMinIntervalMs.load(),
+        g_accelMaxIntervalMs.load(),
+        g_accelJitterMs.load(),
+        g_accelSampleCount.load(),
+        static_cast<float>(g_accelSupported.load())
     };
     env->SetFloatArrayRegion(result, 0, 6, buf);
     return result;
