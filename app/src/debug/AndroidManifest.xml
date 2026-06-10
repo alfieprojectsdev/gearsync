@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug-only manifest overlay. Merges into debug builds only (never release),
+     adding a second launcher entry "GearSync Probe" for the ADR 004 M0
+     accelerometer-rate readout. No effect on the main app or release builds. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <activity
+            android:name=".DebugProbeActivity"
+            android:exported="true"
+            android:label="GearSync Probe">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

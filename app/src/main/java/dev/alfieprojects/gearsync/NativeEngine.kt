@@ -20,6 +20,16 @@ object NativeEngine {
     @JvmStatic external fun nativeVUMeterState(): FloatArray?
 
     /**
+     * ADR 004 Milestone 0 diagnostic — effective raw-ACCELEROMETER delivery rate.
+     * Returns [effectiveHz, minIntervalMs, maxIntervalMs, jitterMs,
+     *          cumulativeSamples, supported (1=yes, 0=no, -1=unknown)].
+     * effectiveHz ≥ 300 means this device's sensor path clears the vibration-fusion
+     * gate. Stationary on a desk is sufficient — this measures capability, not engine
+     * vibration. (see plans/accel-fft-sensor-fusion-implementation-plan.md M0)
+     */
+    @JvmStatic external fun nativeAccelProbeStats(): FloatArray?
+
+    /**
      * VU state consumed by VUMeterView at 60 FPS. Normally proxies the native
      * engine; in the `sweep` build type (BuildConfig.VU_SWEEP) it returns a
      * synthetic ramp from [DebugSweep] so a built APK self-demos the meter with
