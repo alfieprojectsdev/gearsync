@@ -14,7 +14,8 @@ data class VehicleConfig(
     val toleranceLow: Float,
     val toleranceHigh: Float,
     val steadyStateWindowSeconds: Int,
-    val speedJitterThresholdMps: Float
+    val speedJitterThresholdMps: Float,
+    val useVibrationFusion: Boolean
 ) {
     companion object {
         private const val ASSET = "vehicle_config.json"
@@ -52,7 +53,8 @@ data class VehicleConfig(
                 toleranceLow          = calibration.getDouble("ratioToleranceLow").toFloat(),
                 toleranceHigh         = calibration.getDouble("ratioToleranceHigh").toFloat(),
                 steadyStateWindowSeconds = calibration.getInt("steadyStateWindowSeconds"),
-                speedJitterThresholdMps  = calibration.getDouble("speedJitterThresholdMps").toFloat()
+                speedJitterThresholdMps  = calibration.getDouble("speedJitterThresholdMps").toFloat(),
+                useVibrationFusion       = calibration.optBoolean("useVibrationFusion", false)
             )
         }
     }

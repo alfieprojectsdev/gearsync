@@ -79,7 +79,8 @@ class ShiftAssistantService : Service() {
                 toleranceLow             = cfg.toleranceLow,
                 toleranceHigh            = cfg.toleranceHigh,
                 stabilityWindowSamples   = cfg.steadyStateWindowSeconds, // GPS = 1 Hz, so seconds == samples
-                speedJitterThresholdMps  = cfg.speedJitterThresholdMps
+                speedJitterThresholdMps  = cfg.speedJitterThresholdMps,
+                useVibrationFusion       = cfg.useVibrationFusion
             )
         } catch (e: Exception) {
             // Config load failure is non-fatal; engine continues unconfigured (open tolerances).

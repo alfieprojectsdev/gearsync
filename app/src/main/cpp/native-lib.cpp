@@ -38,6 +38,21 @@ static constexpr int   SENSOR_US          = 10000;        // 100 Hz (fallback if
 static constexpr float ACCEL_RATE_GATE_HZ  = 300.0f;
 static constexpr int   ACCEL_PROBE_WINDOW  = 512;         // intervals per published stats window
 
+enum VibrationDisabledReason : int {
+    VIB_REASON_NONE = 0,
+    VIB_REASON_CONFIG_DISABLED = 1,
+    VIB_REASON_ACCEL_UNSUPPORTED = 2,
+    VIB_REASON_LOW_RATE = 3,
+    VIB_REASON_DSP_PENDING = 4
+};
+
+enum VibrationSourceMode : int {
+    VIB_SOURCE_MIC_ONLY = 0,
+    VIB_SOURCE_FUSED = 1,
+    VIB_SOURCE_REJECTED_LOW_RATE = 2,
+    VIB_SOURCE_REJECTED_LOW_PROMINENCE = 3
+};
+
 // ─── Shared state (atomic where possible) ────────────────────────────────────
 
 static std::atomic<float>    g_gpsSpeed{0.0f};            // metres per second from GPS
@@ -53,6 +68,7 @@ static std::atomic<float>    g_accelMaxIntervalMs{0.0f};  // max inter-arrival i
 static std::atomic<float>    g_accelJitterMs{0.0f};       // stddev of inter-arrival in last window
 static std::atomic<float>    g_accelSampleCount{0.0f};    // cumulative samples seen
 static std::atomic<int>      g_accelSupported{-1};        // -1 unknown, 0 unsupported, 1 supported
+static std::atomic<float>    g_accelRequestedHz{0.0f};    // requested raw-accel rate from min-delay
 
 // ─── Vehicle config (set once via setVehicleConfig JNI, then read-only) ──────
 
@@ -60,6 +76,7 @@ static std::atomic<float>    g_toleranceLow{0.0f};            // 0 = open (no re
 static std::atomic<float>    g_toleranceHigh{0.0f};
 static std::atomic<int>      g_stabilityWindowSamples{0};     // 0 = no window required
 static std::atomic<float>    g_speedJitterThreshold{0.5f};    // m/s
+static std::atomic<bool>     g_useVibrationFusion{false};     // ADR 004 opt-in; mic remains default
 
 // ─── GPS speed stability tracking (updated in updateGpsSpeed at 1 Hz) ────────
 
@@ -88,6 +105,42 @@ static std::atomic<bool>     g_dspRunning{false};
 // ─── Calibration engine ───────────────────────────────────────────────────────
 
 static CalibrationEngine g_calibEngine;
+
+// ─── ADR 004 M1 vibration-fusion diagnostics ────────────────────────────────
+// M1 is flag + diagnostic plumbing only. The ring/FFT/fusion path lands in
+// M2-M4, so fusionActive remains false and source remains mic-primary.
+
+static std::atomic<bool>     g_vibrationFusionActive{false};
+static std::atomic<int>      g_vibrationDisabledReason{VIB_REASON_CONFIG_DISABLED};
+static std::atomic<int>      g_vibrationSourceMode{VIB_SOURCE_MIC_ONLY};
+static std::atomic<float>    g_vibrationHz{0.0f};
+static std::atomic<float>    g_vibrationProminence{0.0f};
+
+static void updateVibrationFusionDiagnostics() {
+    const bool requested = g_useVibrationFusion.load(std::memory_order_relaxed);
+    const int supported = g_accelSupported.load(std::memory_order_relaxed);
+    const float effHz = g_accelEffHz.load(std::memory_order_relaxed);
+
+    g_vibrationFusionActive.store(false, std::memory_order_relaxed);
+    g_vibrationHz.store(0.0f, std::memory_order_relaxed);
+    g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
+
+    if (!requested) {
+        g_vibrationDisabledReason.store(VIB_REASON_CONFIG_DISABLED, std::memory_order_relaxed);
+        g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
+    } else if (supported == 0) {
+        g_vibrationDisabledReason.store(VIB_REASON_ACCEL_UNSUPPORTED, std::memory_order_relaxed);
+        g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
+    } else if (effHz < ACCEL_RATE_GATE_HZ) {
+        g_vibrationDisabledReason.store(VIB_REASON_LOW_RATE, std::memory_order_relaxed);
+        g_vibrationSourceMode.store(VIB_SOURCE_REJECTED_LOW_RATE, std::memory_order_relaxed);
+    } else {
+        // Rate gate is open, but M1 intentionally does not implement the
+        // accelerometer SPSC ring, vibration FFT, or fusion policy yet.
+        g_vibrationDisabledReason.store(VIB_REASON_DSP_PENDING, std::memory_order_relaxed);
+        g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
+    }
+}
 
 // ─── JVM callback state ──────────────────────────────────────────────────────
 //
@@ -351,6 +404,7 @@ static void publishAccelStats(const float* intervalsMs, int count, float cumulat
     g_accelMaxIntervalMs.store(mx);
     g_accelJitterMs.store(std::sqrt(var));
     g_accelSampleCount.store(cumulativeSamples);
+    updateVibrationFusionDiagnostics();
     LOGI("Accel probe: %.1f Hz (gate %.0f → %s), interval mean=%.2f min=%.2f max=%.2f jitter=%.2f ms",
          effHz, ACCEL_RATE_GATE_HZ, effHz >= ACCEL_RATE_GATE_HZ ? "PASS" : "LOW",
          mean, mn, mx, std::sqrt(var));
@@ -363,6 +417,7 @@ static void sensorThreadFn() {
     if (!g_sensorManager) {
         LOGE("ASensorManager unavailable");
         g_accelSupported.store(0);
+        updateVibrationFusionDiagnostics();
         g_sensorRunning.store(false);  // reflect actual stopped state
         return;
     }
@@ -372,6 +427,7 @@ static void sensorThreadFn() {
     if (!accel) {
         LOGE("ACCELEROMETER sensor unavailable");
         g_accelSupported.store(0);
+        updateVibrationFusionDiagnostics();
         g_sensorRunning.store(false);  // reflect actual stopped state
         return;
     }
@@ -381,6 +437,7 @@ static void sensorThreadFn() {
     if (!g_sensorEventQueue) {
         LOGE("Failed to create sensor event queue");
         g_accelSupported.store(0);
+        updateVibrationFusionDiagnostics();
         g_sensorRunning.store(false);
         return;
     }
@@ -394,11 +451,14 @@ static void sensorThreadFn() {
         ASensorManager_destroyEventQueue(g_sensorManager, g_sensorEventQueue);
         g_sensorEventQueue = nullptr;
         g_accelSupported.store(0);
+        updateVibrationFusionDiagnostics();
         g_sensorRunning.store(false);
         return;
     }
     // Only now is the probe genuinely live — publish support after success.
+    g_accelRequestedHz.store(minDelayUs > 0 ? 1000000.0f / static_cast<float>(minDelayUs) : 0.0f);
     g_accelSupported.store(1);
+    updateVibrationFusionDiagnostics();
     LOGI("Sensor thread running: raw ACCELEROMETER at %d µs (min-delay)", minDelayUs);
 
     // Worker-local rate-probe accumulators (no heap alloc in the loop).
@@ -583,6 +643,29 @@ Java_dev_alfieprojects_gearsync_NativeEngine_nativeAccelProbeStats(JNIEnv* env, 
     return result;
 }
 
+// ADR 004 M1 diagnostic. Returns float[8]:
+//   [requestedAccelHz, measuredAccelHz, useVibrationFusion (1/0),
+//    fusionActive (1/0), disabledReasonCode, latestVibrationHz,
+//    vibrationProminence, sourceModeCode]
+JNIEXPORT jfloatArray JNICALL
+Java_dev_alfieprojects_gearsync_NativeEngine_nativeVibrationFusionStats(JNIEnv* env, jclass) {
+    updateVibrationFusionDiagnostics();
+    jfloatArray result = env->NewFloatArray(8);
+    if (!result) return nullptr;
+    float buf[8] = {
+        g_accelRequestedHz.load(),
+        g_accelEffHz.load(),
+        g_useVibrationFusion.load() ? 1.0f : 0.0f,
+        g_vibrationFusionActive.load() ? 1.0f : 0.0f,
+        static_cast<float>(g_vibrationDisabledReason.load()),
+        g_vibrationHz.load(),
+        g_vibrationProminence.load(),
+        static_cast<float>(g_vibrationSourceMode.load())
+    };
+    env->SetFloatArrayRegion(result, 0, 8, buf);
+    return result;
+}
+
 // Restore Welford + gear-ratio state from a previous session.
 // stateArray layout: [n_float, mean, m2, ratio0, ratio1, ratio2, ratio3, ratio4]
 JNIEXPORT void JNICALL
@@ -626,7 +709,8 @@ Java_dev_alfieprojects_gearsync_NativeEngine_setVehicleConfig(JNIEnv*     env,
                                                            jfloat      toleranceLow,
                                                            jfloat      toleranceHigh,
                                                            jint        stabilityWindowSamples,
-                                                           jfloat      speedJitterThresholdMps) {
+                                                           jfloat      speedJitterThresholdMps,
+                                                           jboolean    useVibrationFusion) {
     if (!kSeedsArr) return;
     jsize len = env->GetArrayLength(kSeedsArr);
     if (len < NUM_GEARS) return;
@@ -641,11 +725,14 @@ Java_dev_alfieprojects_gearsync_NativeEngine_setVehicleConfig(JNIEnv*     env,
     g_toleranceHigh.store(toleranceHigh);
     g_stabilityWindowSamples.store(stabilityWindowSamples);
     g_speedJitterThreshold.store(speedJitterThresholdMps);
+    g_useVibrationFusion.store(useVibrationFusion == JNI_TRUE);
+    updateVibrationFusionDiagnostics();
 
-    LOGI("Vehicle config applied — tol=[%.3f, %.3f] stableWin=%d jitter=%.2f m/s",
+    LOGI("Vehicle config applied — tol=[%.3f, %.3f] stableWin=%d jitter=%.2f m/s vibFusion=%s",
          static_cast<float>(toleranceLow), static_cast<float>(toleranceHigh),
          static_cast<int>(stabilityWindowSamples),
-         static_cast<float>(speedJitterThresholdMps));
+         static_cast<float>(speedJitterThresholdMps),
+         useVibrationFusion == JNI_TRUE ? "on" : "off");
 }
 
 // ─── Guided calibration control (called from CalibrationActivity) ────────────

@@ -67,11 +67,12 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 | `updateGpsSpeed(float)` | Kt→C++ | Service location cb | 1 Hz |
 | `nativeVUMeterState(): FloatArray` | C++→Kt | VUMeterView (via `getVUMeterState` wrapper) | 60 Hz |
 | `nativeAccelProbeStats(): FloatArray` | C++→Kt | ADR 004 M0 diagnostic | on demand |
+| `nativeVibrationFusionStats(): FloatArray` | C++→Kt | ADR 004 M1 diagnostic | on demand |
 | `resumeCalibrationState(FloatArray)` | Kt→C++ | Service.onCreate | once |
 | `saveCalibrationState(): FloatArray` | C++→Kt | Service.onDestroy | once |
-| `setVehicleConfig(FloatArray kSeeds, …)` | Kt→C++ | startup, from VehicleConfig | once |
+| `setVehicleConfig(FloatArray kSeeds, …, Boolean useVibrationFusion)` | Kt→C++ | startup, from VehicleConfig | once |
 
-11 externals in `NativeEngine.kt` must match 11 `Java_dev_alfieprojects_gearsync_NativeEngine_*` exports in `native-lib.cpp` (mismatch = UnsatisfiedLinkError), plus the C++→Kt `onGearCalibrated` upcall. (`nativeAccelProbeStats` is the ADR 004 M0 raw-accel rate diagnostic — returns `[effectiveHz, minIntervalMs, maxIntervalMs, jitterMs, cumulativeSamples, supported]`.) State array (13 floats): `[n, mean, m2, ratio0…ratio4, pin0…pin4]` → SharedPreferences (no Room/SQLite); `deserialise` still loads the legacy 8-float blob, defaulting pin flags to unpinned. The native export is `nativeVUMeterState`; Kotlin `getVUMeterState` is a thin wrapper that returns synthetic `DebugSweep` frames in the `sweep` build type (`BuildConfig.VU_SWEEP`) and proxies the native call otherwise. It returns `[needlePos, dominantHz, speedMps, gear(1-based,0=unknown), confidence, shiftDetected]`. JNI externals need `@JvmStatic`; `NativeEngine` kept by `proguard-rules.pro`.
+12 externals in `NativeEngine.kt` must match 12 `Java_dev_alfieprojects_gearsync_NativeEngine_*` exports in `native-lib.cpp` (mismatch = UnsatisfiedLinkError), plus the C++→Kt `onGearCalibrated` upcall. (`nativeAccelProbeStats` is the ADR 004 M0 raw-accel rate diagnostic — returns `[effectiveHz, minIntervalMs, maxIntervalMs, jitterMs, cumulativeSamples, supported]`; `nativeVibrationFusionStats` is the ADR 004 M1 gate diagnostic — returns `[requestedAccelHz, measuredAccelHz, useVibrationFusion, fusionActive, disabledReasonCode, latestVibrationHz, vibrationProminence, sourceModeCode]`.) State array (13 floats): `[n, mean, m2, ratio0…ratio4, pin0…pin4]` → SharedPreferences (no Room/SQLite); `deserialise` still loads the legacy 8-float blob, defaulting pin flags to unpinned. The native export is `nativeVUMeterState`; Kotlin `getVUMeterState` is a thin wrapper that returns synthetic `DebugSweep` frames in the `sweep` build type (`BuildConfig.VU_SWEEP`) and proxies the native call otherwise. It returns `[needlePos, dominantHz, speedMps, gear(1-based,0=unknown), confidence, shiftDetected]`. JNI externals need `@JvmStatic`; `NativeEngine` kept by `proguard-rules.pro`.
 
 ## Conventions
 
@@ -80,7 +81,7 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 - UI strings → `strings.xml`, colors → `colors.xml`. No hardcoded literals.
 - VUMeterView: pause Choreographer when not visible (`isRunning` flag, `onVisibilityChanged`).
 - New vehicle = edit `vehicle_config.json`, no recompile.
-- Workflow + session log: append to `session-notes.md`.
+- Workflow + session log: branch for implementation, open PR, request CodeRabbit review, never commit directly to `main`, and append to `session-notes.md`. For parallel agent work, prefer worktrees under `/home/finch/repos/gearsync/worktrees/`.
 
 ## Open items (see session-notes.md / README Current Limitations)
 
