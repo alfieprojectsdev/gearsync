@@ -375,16 +375,30 @@ static void sensorThreadFn() {
         g_sensorRunning.store(false);  // reflect actual stopped state
         return;
     }
-    g_accelSupported.store(1);
 
     g_sensorEventQueue = ASensorManager_createEventQueue(
             g_sensorManager, looper, ALOOPER_EVENT_INPUT, nullptr, nullptr);
+    if (!g_sensorEventQueue) {
+        LOGE("Failed to create sensor event queue");
+        g_accelSupported.store(0);
+        g_sensorRunning.store(false);
+        return;
+    }
 
     // Request the fastest delivery the sensor advertises; fall back to SENSOR_US.
     int minDelayUs = ASensor_getMinDelay(accel);
     if (minDelayUs <= 0) minDelayUs = SENSOR_US;
-    ASensorEventQueue_enableSensor(g_sensorEventQueue, accel);
-    ASensorEventQueue_setEventRate(g_sensorEventQueue, accel, minDelayUs);
+    if (ASensorEventQueue_enableSensor(g_sensorEventQueue, accel) < 0 ||
+        ASensorEventQueue_setEventRate(g_sensorEventQueue, accel, minDelayUs) < 0) {
+        LOGE("Failed to enable/configure accelerometer event rate");
+        ASensorManager_destroyEventQueue(g_sensorManager, g_sensorEventQueue);
+        g_sensorEventQueue = nullptr;
+        g_accelSupported.store(0);
+        g_sensorRunning.store(false);
+        return;
+    }
+    // Only now is the probe genuinely live — publish support after success.
+    g_accelSupported.store(1);
     LOGI("Sensor thread running: raw ACCELEROMETER at %d µs (min-delay)", minDelayUs);
 
     // Worker-local rate-probe accumulators (no heap alloc in the loop).

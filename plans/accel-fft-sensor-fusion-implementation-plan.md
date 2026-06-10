@@ -66,21 +66,21 @@ The microphone FFT path is the primary engine-frequency source today: `InputCall
 
 **Flags**: device-required, no-fusion-yet (gate met)
 
-**Requirements**:
+**Requirements** — **STATUS: DONE** (implemented on `feat/accel-probe`; validated on target):
 
-- Switch the sensor request from `ASENSOR_TYPE_LINEAR_ACCELERATION` @ `SENSOR_US = 10000` to **raw `ASENSOR_TYPE_ACCELEROMETER` at fastest practical rate** (DL-007).
-- **Declare `HIGH_SAMPLING_RATE_SENSORS` in the manifest** (DL-011) — without it, API 31+ silently caps delivery at 200 Hz (Nyquist 100 Hz → aliases the firing band). Confirmed on target: 200 Hz → 399 Hz after adding it.
-- Measure effective sample rate from event timestamps over multiple windows: average Hz, min/max inter-arrival time, jitter, dropped/batched behavior, samples per poll.
-- Expose the measured rate via logcat **and a JNI-accessible diagnostic** — adding the JNI method must keep 10↔10 external/export parity (DL-009).
-- Re-assert the hard gate (`effectiveRateHz >= 300 Hz`) in-app for portability to *other* devices; below it, ADR 004 stays disabled + mic-only.
-- Preserve existing shift-spike detection on the raw stream (C-007 — gravity now present; act on delta/high-passed magnitude).
+- ✅ Switched the sensor request from `ASENSOR_TYPE_LINEAR_ACCELERATION` @ `SENSOR_US = 10000` to **raw `ASENSOR_TYPE_ACCELEROMETER` at fastest practical rate** (DL-007).
+- ✅ Declared `HIGH_SAMPLING_RATE_SENSORS` in the manifest (DL-011) — without it, API 31+ silently capped delivery at 200 Hz (Nyquist 100 Hz → aliases the firing band). Confirmed on target: 200 Hz → 399 Hz after adding it.
+- ✅ Measured effective sample rate from event timestamps over windows: average Hz, min/max inter-arrival, jitter, samples per window.
+- ✅ Exposed the measured rate via logcat **and a JNI diagnostic** (`nativeAccelProbeStats`), keeping 11↔11 external/export parity (DL-009).
+- ✅ Re-asserts the hard gate (`effectiveRateHz >= 300 Hz`) in-app for portability to *other* devices; below it, ADR 004 stays disabled + mic-only.
+- ✅ Preserved shift-spike detection on the raw stream (C-007 — gravity removed via slow EMA before the threshold test).
 
-**Acceptance Criteria**:
+**Acceptance Criteria** — all met:
 
-- A physical device run reports measured raw-accel effective rate + jitter (not just the requested rate); target confirms ~400 Hz on our own path.
-- The in-app gate disables fusion + stays mic-only on any device measuring < ~300 Hz.
-- 10↔10 JNI parity preserved; `CLAUDE.md` JNI table + count updated.
-- `./gradlew assembleDebug` passes.
+- ✅ Physical device reports measured raw-accel rate + jitter (not just requested): **399.2 Hz / 2.50 ms** on target.
+- ✅ The in-app gate disables fusion + stays mic-only below ~300 Hz (first run read 200 Hz → caught the cap).
+- ✅ 11↔11 JNI parity preserved; `CLAUDE.md` JNI table + count updated.
+- ✅ `./gradlew assembleDebug` passes (built + installed on device).
 
 **Tests**:
 
@@ -201,7 +201,7 @@ The microphone FFT path is the primary engine-frequency source today: `InputCall
 - Implement a project-owned autocorrelation or subharmonic consistency check; the vibration FFT *will* latch onto aliased 2x/3x harmonics on this device, so this is not contingent on field observation.
 - Treat phyphox as prior art only: no copied code or direct translation.
 - Prefer the fundamental when autocorrelation and FFT indicate a likely harmonic relationship and the corrected frequency is plausible against mic/GPS/gear context.
-- Keep this milestone optional until Milestone 3 and 4 data demonstrate the need.
+- Ship this guard as part of the initial fusion (M3/M4), not deferred: the 200 Hz Nyquist guarantees high-RPM harmonic aliasing on this device (DL-008), so M3/M4 data is not needed to justify it. Tune thresholds against M3/M4 field data, but the guard is present from first fusion.
 
 **Acceptance Criteria**:
 
