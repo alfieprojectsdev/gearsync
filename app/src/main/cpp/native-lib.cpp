@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -37,6 +38,9 @@ static constexpr int   SENSOR_US          = 10000;        // 100 Hz (fallback if
 // confirms our code path lands there too). Gate for fusion is >= ~300 Hz. (DL-001/007/009)
 static constexpr float ACCEL_RATE_GATE_HZ  = 300.0f;
 static constexpr int   ACCEL_PROBE_WINDOW  = 512;         // intervals per published stats window
+static constexpr uint32_t ACCEL_RING_SIZE  = 1024;        // > 0.64 s @ 400 Hz, power of two
+static constexpr uint32_t ACCEL_RING_MASK  = ACCEL_RING_SIZE - 1;
+static_assert((ACCEL_RING_SIZE & ACCEL_RING_MASK) == 0, "ACCEL_RING_SIZE must be power of two");
 
 enum VibrationDisabledReason : int {
     VIB_REASON_NONE = 0,
@@ -69,6 +73,24 @@ static std::atomic<float>    g_accelJitterMs{0.0f};       // stddev of inter-arr
 static std::atomic<float>    g_accelSampleCount{0.0f};    // cumulative samples seen
 static std::atomic<int>      g_accelSupported{-1};        // -1 unknown, 0 unsupported, 1 supported
 static std::atomic<float>    g_accelRequestedHz{0.0f};    // requested raw-accel rate from min-delay
+
+// ─── ADR 004 M2 accelerometer SPSC ring ─────────────────────────────────────
+// Sensor thread is the only producer. The DSP worker is the only consumer.
+// Entries are timestamped raw-ACCELEROMETER magnitudes; resampling/FFT/fusion
+// intentionally wait for M3+.
+
+struct AccelSample {
+    int64_t timestampNs;
+    float   magnitude;
+};
+
+static AccelSample           g_accelRing[ACCEL_RING_SIZE]{};
+static std::atomic<uint32_t> g_accelRingWriteSeq{0};
+static std::atomic<uint32_t> g_accelRingReadSeq{0};
+static std::atomic<uint32_t> g_accelRingDropped{0};
+static std::atomic<uint32_t> g_accelRingWritten{0};
+static std::atomic<uint32_t> g_accelRingRead{0};
+static std::atomic<float>    g_accelRingLatestMagnitude{0.0f};
 
 // ─── Vehicle config (set once via setVehicleConfig JNI, then read-only) ──────
 
@@ -106,9 +128,9 @@ static std::atomic<bool>     g_dspRunning{false};
 
 static CalibrationEngine g_calibEngine;
 
-// ─── ADR 004 M1 vibration-fusion diagnostics ────────────────────────────────
-// M1 is flag + diagnostic plumbing only. The ring/FFT/fusion path lands in
-// M2-M4, so fusionActive remains false and source remains mic-primary.
+// ─── ADR 004 vibration-fusion diagnostics ───────────────────────────────────
+// M2 adds the accelerometer SPSC ring only. FFT/fusion lands in later
+// milestones, so fusionActive remains false and source remains mic-primary.
 
 static std::atomic<bool>     g_vibrationFusionActive{false};
 static std::atomic<int>      g_vibrationDisabledReason{VIB_REASON_CONFIG_DISABLED};
@@ -135,11 +157,50 @@ static void updateVibrationFusionDiagnostics() {
         g_vibrationDisabledReason.store(VIB_REASON_LOW_RATE, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_REJECTED_LOW_RATE, std::memory_order_relaxed);
     } else {
-        // Rate gate is open, but M1 intentionally does not implement the
-        // accelerometer SPSC ring, vibration FFT, or fusion policy yet.
+        // Rate gate is open, but M2 intentionally does not implement the
+        // vibration FFT or fusion policy yet.
         g_vibrationDisabledReason.store(VIB_REASON_DSP_PENDING, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
     }
+}
+
+static void resetAccelRing() {
+    g_accelRingWriteSeq.store(0, std::memory_order_relaxed);
+    g_accelRingReadSeq.store(0, std::memory_order_relaxed);
+    g_accelRingDropped.store(0, std::memory_order_relaxed);
+    g_accelRingWritten.store(0, std::memory_order_relaxed);
+    g_accelRingRead.store(0, std::memory_order_relaxed);
+    g_accelRingLatestMagnitude.store(0.0f, std::memory_order_relaxed);
+}
+
+static inline void writeAccelRingSample(int64_t timestampNs, float magnitude) {
+    if (timestampNs <= 0 || !std::isfinite(magnitude)) return;
+
+    const uint32_t w = g_accelRingWriteSeq.load(std::memory_order_relaxed);
+    const uint32_t r = g_accelRingReadSeq.load(std::memory_order_acquire);
+    if (static_cast<uint32_t>(w - r) >= ACCEL_RING_SIZE) {
+        g_accelRingDropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    g_accelRing[w & ACCEL_RING_MASK] = AccelSample{timestampNs, magnitude};
+    g_accelRingLatestMagnitude.store(magnitude, std::memory_order_relaxed);
+    g_accelRingWritten.fetch_add(1, std::memory_order_relaxed);
+    g_accelRingWriteSeq.store(w + 1, std::memory_order_release);
+}
+
+static void drainAccelRingForDiagnostics() {
+    const uint32_t r = g_accelRingReadSeq.load(std::memory_order_relaxed);
+    const uint32_t w = g_accelRingWriteSeq.load(std::memory_order_acquire);
+    const uint32_t available = static_cast<uint32_t>(w - r);
+    if (available == 0) return;
+
+    AccelSample last = g_accelRing[(w - 1) & ACCEL_RING_MASK];
+    if (std::isfinite(last.magnitude)) {
+        g_accelRingLatestMagnitude.store(last.magnitude, std::memory_order_relaxed);
+    }
+    g_accelRingRead.fetch_add(available, std::memory_order_relaxed);
+    g_accelRingReadSeq.store(w, std::memory_order_release);
 }
 
 // ─── JVM callback state ──────────────────────────────────────────────────────
@@ -230,6 +291,8 @@ static void dspWorkerFn() {
     }
 
     while (g_dspRunning.load(std::memory_order_relaxed)) {
+        drainAccelRingForDiagnostics();
+
         uint32_t w = g_dspWriteSeq.load(std::memory_order_acquire);
         uint32_t r = g_dspReadSeq.load(std::memory_order_relaxed);
 
@@ -495,6 +558,7 @@ static void sensorThreadFn() {
                 }
                 prevTs = ts;
                 cumulativeCount += 1.0f;
+                writeAccelRingSample(ts, mag);
 
                 if (intervalCount >= ACCEL_PROBE_WINDOW) {
                     publishAccelStats(intervalsMs, intervalCount, cumulativeCount);
@@ -537,6 +601,7 @@ Java_dev_alfieprojects_gearsync_NativeEngine_startEngine(JNIEnv* env, jclass cls
     // into the first DSP snapshot after restart.
     g_pcmHead = 0;
     std::memset(g_pcmRing, 0, sizeof(g_pcmRing));
+    resetAccelRing();
 
     // Reset GPS stability counters so the stability window starts fresh.
     g_prevGpsSpeed.store(-1.0f);
@@ -644,16 +709,17 @@ Java_dev_alfieprojects_gearsync_NativeEngine_nativeAccelProbeStats(JNIEnv* env, 
     return result;
 }
 
-// ADR 004 M1 diagnostic. Returns float[8]:
+// ADR 004 diagnostic. Returns float[12]:
 //   [requestedAccelHz, measuredAccelHz, useVibrationFusion (1/0),
 //    fusionActive (1/0), disabledReasonCode, latestVibrationHz,
-//    vibrationProminence, sourceModeCode]
+//    vibrationProminence, sourceModeCode, accelRingWritten, accelRingRead,
+//    accelRingDropped, latestAccelMagnitude]
 JNIEXPORT jfloatArray JNICALL
 Java_dev_alfieprojects_gearsync_NativeEngine_nativeVibrationFusionStats(JNIEnv* env, jclass) {
     updateVibrationFusionDiagnostics();
-    jfloatArray result = env->NewFloatArray(8);
+    jfloatArray result = env->NewFloatArray(12);
     if (!result) return nullptr;
-    float buf[8] = {
+    float buf[12] = {
         g_accelRequestedHz.load(),
         g_accelEffHz.load(),
         g_useVibrationFusion.load() ? 1.0f : 0.0f,
@@ -661,9 +727,13 @@ Java_dev_alfieprojects_gearsync_NativeEngine_nativeVibrationFusionStats(JNIEnv* 
         static_cast<float>(g_vibrationDisabledReason.load()),
         g_vibrationHz.load(),
         g_vibrationProminence.load(),
-        static_cast<float>(g_vibrationSourceMode.load())
+        static_cast<float>(g_vibrationSourceMode.load()),
+        static_cast<float>(g_accelRingWritten.load()),
+        static_cast<float>(g_accelRingRead.load()),
+        static_cast<float>(g_accelRingDropped.load()),
+        g_accelRingLatestMagnitude.load()
     };
-    env->SetFloatArrayRegion(result, 0, 8, buf);
+    env->SetFloatArrayRegion(result, 0, 12, buf);
     return result;
 }
 

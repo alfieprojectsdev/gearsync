@@ -237,3 +237,14 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - No accel SPSC ring, vibration FFT, harmonic guard, or fusion behavior implemented yet. Mic-only remains primary/default; with M1 the diagnostic source mode remains `MIC_ONLY` unless a requested feature is rejected for low rate.
 - Added ADR 004 to `adr.md`; updated `CLAUDE.md` and `README.md` for the opt-in/rate-gated scaffold and workflow.
 - Verified: `./gradlew assembleDebug` **BUILD SUCCESSFUL**. SDK XML/deprecation warnings are environmental/existing.
+
+---
+
+## Session 2026-06-11 — ADR 004 M2 accel SPSC ring
+
+- Implemented from worktree `/home/finch/repos/gearsync/worktrees/codex-adr004-m2-accel-ring` on branch `feat/adr004-m2-accel-ring`; root checkout returned to `main`.
+- Added native timestamped raw-accelerometer magnitude SPSC ring (`g_accelRingWriteSeq`/`g_accelRingReadSeq`) sized at 1024 samples, with non-blocking sensor-thread writes and dropped-sample diagnostics on overrun.
+- Sensor path still only computes magnitude and gravity-EMA shift flash; no FFT, resampling, harmonic guard, or fusion behavior added in M2.
+- DSP worker drains the accel ring for diagnostics only, preserving the single-DSP-worker design for later M3 processing.
+- Expanded `nativeVibrationFusionStats()` payload to include ring written/read/dropped counters and latest magnitude without adding a JNI method; parity remains 12 Kotlin externals to 12 native exports.
+- Verified: `./gradlew assembleDebug` **BUILD SUCCESSFUL** from the M2 worktree after copying ignored `local.properties` into the worktree.
