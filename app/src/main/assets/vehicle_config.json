@@ -28,6 +28,9 @@
     "steadyStateWindowSeconds": 4,
 
     "_comment_jitter": "Speed delta (m/s) below which consecutive GPS readings are considered 'stable'. 0.5 m/s ≈ 1.8 km/h.",
-    "speedJitterThresholdMps": 0.5
+    "speedJitterThresholdMps": 0.5,
+
+    "_comment_vibration": "ADR 004 opt-in. Defaults off: the microphone path remains primary and vibration fusion is additive/rate-gated.",
+    "useVibrationFusion": false
   }
 }

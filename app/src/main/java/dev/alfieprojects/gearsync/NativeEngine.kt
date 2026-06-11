@@ -30,6 +30,20 @@ object NativeEngine {
     @JvmStatic external fun nativeAccelProbeStats(): FloatArray?
 
     /**
+     * ADR 004 Milestone 1 diagnostic — vibration-fusion feature gate/state.
+     * Returns float[8]:
+     * [requestedAccelHz, measuredAccelHz, useVibrationFusion (1/0),
+     *  fusionActive (1/0), disabledReasonCode, latestVibrationHz,
+     *  vibrationProminence, sourceModeCode].
+     *
+     * Reason codes: 0 none, 1 config disabled, 2 accelerometer unsupported,
+     * 3 low accel rate, 4 DSP/fusion path not implemented yet.
+     * Source modes: 0 MIC_ONLY, 1 FUSED, 2 VIB_REJECTED_LOW_RATE,
+     * 3 VIB_REJECTED_LOW_PROMINENCE.
+     */
+    @JvmStatic external fun nativeVibrationFusionStats(): FloatArray?
+
+    /**
      * VU state consumed by VUMeterView at 60 FPS. Normally proxies the native
      * engine; in the `sweep` build type (BuildConfig.VU_SWEEP) it returns a
      * synthetic ramp from [DebugSweep] so a built APK self-demos the meter with
@@ -62,13 +76,15 @@ object NativeEngine {
      * @param toleranceHigh           Fraction above theoretical k_g that is still accepted (e.g. 1.025).
      * @param stabilityWindowSamples  Consecutive stable GPS samples before feeding Welford.
      * @param speedJitterThresholdMps Speed delta (m/s) considered "stable" between GPS updates.
+     * @param useVibrationFusion       Opt-in ADR 004 vibration fusion flag. Defaults false in config.
      */
     @JvmStatic external fun setVehicleConfig(
         kSeeds: FloatArray,
         toleranceLow: Float,
         toleranceHigh: Float,
         stabilityWindowSamples: Int,
-        speedJitterThresholdMps: Float
+        speedJitterThresholdMps: Float,
+        useVibrationFusion: Boolean
     )
 
     // ─── Guided calibration ───────────────────────────────────────────────────

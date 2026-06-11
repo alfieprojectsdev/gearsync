@@ -226,3 +226,14 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 ### Next
 - **ADR 004 accel-FFT** still device-gated at **M0** (≥300 Hz `LINEAR_ACCELERATION` probe on physical arm64) before any Codex handoff. Codex's plan is at `plans/accel-fft-sensor-fusion-implementation-plan.md` (M0–M6, sound). Two pre-handoff plan gaps: restate the JNI 10↔10 parity invariant; decide same-vs-second DSP worker for the accel path.
 - Device-validation items from the 2026-06-09 entry still open (C-008).
+
+---
+
+## Session 2026-06-10 — ADR 004 M1 flag + diagnostics
+
+- Started M1 on `feat/adr004-m1-diagnostics`, based on `feat/accel-probe` because PR #8/M0 had not reached local `origin/main` yet. Future parallel-agent work should use worktrees under `/home/finch/repos/gearsync/worktrees/`.
+- Implemented Milestone 1 only: `useVibrationFusion` config flag defaults false, flows `vehicle_config.json` → `VehicleConfig.kt` → `ShiftAssistantService` → native `setVehicleConfig`.
+- Added `nativeVibrationFusionStats()` diagnostic JNI call. JNI parity is now 12 Kotlin externals ↔ 12 native exports. Payload: `[requestedAccelHz, measuredAccelHz, useVibrationFusion, fusionActive, disabledReasonCode, latestVibrationHz, vibrationProminence, sourceModeCode]`.
+- No accel SPSC ring, vibration FFT, harmonic guard, or fusion behavior implemented yet. Mic-only remains primary/default; with M1 the diagnostic source mode remains `MIC_ONLY` unless a requested feature is rejected for low rate.
+- Added ADR 004 to `adr.md`; updated `CLAUDE.md` and `README.md` for the opt-in/rate-gated scaffold and workflow.
+- Verified: `./gradlew assembleDebug` **BUILD SUCCESSFUL**. SDK XML/deprecation warnings are environmental/existing.

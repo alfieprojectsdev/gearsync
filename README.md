@@ -10,7 +10,7 @@ The core digital signal processing (DSP) pipeline and machine learning calibrati
 
 ## Features
 
-* **Acoustic & Vibration Tachometer:** Utilizes hardware microphone PCM data and high-frequency linear accelerometer tracking to extract engine firing frequencies without modifying vehicle electronics.
+* **Acoustic Tachometer with Opt-In Vibration Fusion:** Utilizes hardware microphone PCM data by default, with rate-gated raw-accelerometer vibration sensing scaffolded as an additive opt-in source for engine firing frequency.
 * **Glanceable Visual Interface:** A hardware-accelerated, custom VU meter UI that conveys current gear, the optimal-shift zone, calibration confidence, and shift events with zero audio distraction.
 * **Edge ML Automated Calibration:** Integrates 1-D K-Means clustering seeded from a configurable per-vehicle profile to adapt to any vehicle's gear ratios and mechanical signature.
 * **Configurable Vehicle Profile:** A JSON asset (`assets/vehicle_config.json`) defines transmission ratios, final drive, tire circumference, and tolerance bands — ships pre-tuned for the **Toyota Wigo 1.0 E M/T** but editable for any vehicle without recompiling.
@@ -30,7 +30,7 @@ GearSync leverages a clear separation of concerns between high-level Android ope
        │
        ▼
 [Native C++ Core] ◄──── [Oboe Input Stream] (Raw Audio PCM, mic)
-       │          ◄──── [ASensorManager] (Linear Acceleration, 100 Hz)
+       │          ◄──── [ASensorManager] (Raw Accelerometer, fastest gated rate)
        ├─► [FFT / Spectral Analysis Layer]   (DSP worker thread)
        ├─► [Edge ML Calibration Engine]       (Welford + K-Means)
        └─► [Shift Decision Logic] ──► [VU Meter UI] (60 FPS Canvas)
@@ -193,7 +193,8 @@ All vehicle-specific parameters live in `app/src/main/assets/vehicle_config.json
   "tire":          { "spec": "155/80 R13", "nominalCircumferenceMeters": 1.816 },
   "calibration":   {
     "ratioToleranceLow": 0.98, "ratioToleranceHigh": 1.025,
-    "steadyStateWindowSeconds": 4, "speedJitterThresholdMps": 0.5
+    "steadyStateWindowSeconds": 4, "speedJitterThresholdMps": 0.5,
+    "useVibrationFusion": false
   }
 }
 ```
@@ -206,8 +207,9 @@ All vehicle-specific parameters live in `app/src/main/assets/vehicle_config.json
 | `ratioToleranceLow/High` | Width of the accept band around each centroid |
 | `steadyStateWindowSeconds` | Seconds of stable cruising before a ratio is learned |
 | `speedJitterThresholdMps` | How much GPS speed may vary and still count as "stable" |
+| `useVibrationFusion` | ADR 004 opt-in flag. Defaults false; mic-only remains the primary/default path |
 
-On startup `VehicleConfig.kt` loads this JSON, computes the `k_g` seeds, and pushes them to the native engine via `NativeEngine.setVehicleConfig(...)`. If the file is missing or malformed, the engine falls back to open tolerances and learns purely from K-Means.
+On startup `VehicleConfig.kt` loads this JSON, computes the `k_g` seeds, and pushes them plus `useVibrationFusion` to the native engine via `NativeEngine.setVehicleConfig(...)`. If the file is missing or malformed, the engine falls back to open tolerances and learns purely from K-Means. Even when vibration fusion is requested, native diagnostics keep it rate-gated and mic-primary.
 
 ---
 
