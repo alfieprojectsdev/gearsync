@@ -26,7 +26,10 @@ Toolchain: AGP 8.3.0, Kotlin 1.9.23, Gradle 8.14.1, JVM target 17, `compileSdk 3
 ```
 app/src/main/cpp/          native C++ core
   native-lib.cpp           Oboe INPUT stream, FFT, sensor thread, shift logic, all JNI bindings
+  DspPrimitives.h          shared owned radix-2 FFT primitive (ADR 001, no heavy deps)
+  AccelVibrationDsp.h      ADR 004 accel resampling + vibration FFT estimate helper
   CalibrationEngine.{h,cpp} Welford online algo + seeded 1-D K-Means++ (k=5) + classifyGear tolerance gate
+  test/                    host-only C++ tests for RANSAC and accel vibration DSP
   CMakeLists.txt           links liblog, libandroid, oboe::oboe
 app/src/main/java/dev/alfieprojects/gearsync/
   NativeEngine.kt          JNI bridge object (System.loadLibrary("native-lib"))
@@ -53,11 +56,11 @@ No tachometer feed; everything inferred from mic + GPS. See README "Shift Decisi
 
 - **Welford** (`CalibrationEngine.cpp`): tracks `n, mean, m2` of ratio. Variance `σ² = m2/n` = lock-confidence threshold. 3 floats persisted, no DB. Enables fragmented-session calibration.
 - **Oboe INPUT only:** mic PCM → lock-free SPSC ring → DSP worker → FFT. No output stream.
-- **Sensor thread:** raw `ASENSOR_TYPE_ACCELEROMETER` at fastest delivery (min-delay) via ALooper — shift-event detection (gravity-removed spike via EMA), ADR 004 M0 rate probe, and M2 timestamped magnitude writes into the accel SPSC ring. (Was fused `LINEAR_ACCELERATION` @ 100 Hz pre-ADR-004; switched per DL-007.)
+- **Sensor thread:** raw `ASENSOR_TYPE_ACCELEROMETER` at fastest delivery (min-delay) via ALooper — shift-event detection (gravity-removed spike via EMA), ADR 004 M0 rate probe, and timestamped magnitude writes into the accel SPSC ring. (Was fused `LINEAR_ACCELERATION` @ 100 Hz pre-ADR-004; switched per DL-007.)
 
 ## Concurrency (C++)
 
-Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT of the audio callback — handoff via lock-free SPSC (`g_dspWriteSeq`/`g_dspReadSeq` atomic, release/acquire). PCM ring write wait-free (single producer). Audio callback wait-free (no locks, no alloc). ADR 004 accel samples use a separate SPSC ring (`g_accelRingWriteSeq`/`g_accelRingReadSeq`) with sensor thread as producer and DSP worker as consumer; M2 drains it for diagnostics only, with FFT/resampling deferred to M3.
+Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT of the audio callback — handoff via lock-free SPSC (`g_dspWriteSeq`/`g_dspReadSeq` atomic, release/acquire). PCM ring write wait-free (single producer). Audio callback wait-free (no locks, no alloc). ADR 004 accel samples use a separate SPSC ring (`g_accelRingWriteSeq`/`g_accelRingReadSeq`) with sensor thread as producer and DSP worker as consumer; M3 resamples a worker-local 256-sample window and computes diagnostic `f_vib`/prominence there. Fusion/source selection still waits for M4.
 
 ## JNI interface
 
@@ -72,7 +75,7 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 | `saveCalibrationState(): FloatArray` | C++→Kt | Service.onDestroy | once |
 | `setVehicleConfig(FloatArray kSeeds, …, Boolean useVibrationFusion)` | Kt→C++ | startup, from VehicleConfig | once |
 
-12 externals in `NativeEngine.kt` must match 12 `Java_dev_alfieprojects_gearsync_NativeEngine_*` exports in `native-lib.cpp` (mismatch = UnsatisfiedLinkError), plus the C++→Kt `onGearCalibrated` upcall. (`nativeAccelProbeStats` is the ADR 004 M0 raw-accel rate diagnostic — returns `[effectiveHz, minIntervalMs, maxIntervalMs, jitterMs, cumulativeSamples, supported]`; `nativeVibrationFusionStats` is the ADR 004 gate/ring diagnostic — returns `[requestedAccelHz, measuredAccelHz, useVibrationFusion, fusionActive, disabledReasonCode, latestVibrationHz, vibrationProminence, sourceModeCode, accelRingWritten, accelRingRead, accelRingDropped, latestAccelMagnitude]`.) State array (13 floats): `[n, mean, m2, ratio0…ratio4, pin0…pin4]` → SharedPreferences (no Room/SQLite); `deserialise` still loads the legacy 8-float blob, defaulting pin flags to unpinned. The native export is `nativeVUMeterState`; Kotlin `getVUMeterState` is a thin wrapper that returns synthetic `DebugSweep` frames in the `sweep` build type (`BuildConfig.VU_SWEEP`) and proxies the native call otherwise. It returns `[needlePos, dominantHz, speedMps, gear(1-based,0=unknown), confidence, shiftDetected]`. JNI externals need `@JvmStatic`; `NativeEngine` kept by `proguard-rules.pro`.
+12 externals in `NativeEngine.kt` must match 12 `Java_dev_alfieprojects_gearsync_NativeEngine_*` exports in `native-lib.cpp` (mismatch = UnsatisfiedLinkError), plus the C++→Kt `onGearCalibrated` upcall. (`nativeAccelProbeStats` is the ADR 004 M0 raw-accel rate diagnostic — returns `[effectiveHz, minIntervalMs, maxIntervalMs, jitterMs, cumulativeSamples, supported]`; `nativeVibrationFusionStats` is the ADR 004 gate/ring/estimate diagnostic — returns `[requestedAccelHz, measuredAccelHz, useVibrationFusion, fusionActive, disabledReasonCode, latestVibrationHz, vibrationProminence, sourceModeCode, accelRingWritten, accelRingRead, accelRingDropped, latestAccelMagnitude]`. Reason code 4 means fusion policy pending: M3 may populate `latestVibrationHz`, but mic remains selected until M4.) State array (13 floats): `[n, mean, m2, ratio0…ratio4, pin0…pin4]` → SharedPreferences (no Room/SQLite); `deserialise` still loads the legacy 8-float blob, defaulting pin flags to unpinned. The native export is `nativeVUMeterState`; Kotlin `getVUMeterState` is a thin wrapper that returns synthetic `DebugSweep` frames in the `sweep` build type (`BuildConfig.VU_SWEEP`) and proxies the native call otherwise. It returns `[needlePos, dominantHz, speedMps, gear(1-based,0=unknown), confidence, shiftDetected]`. JNI externals need `@JvmStatic`; `NativeEngine` kept by `proguard-rules.pro`.
 
 ## Conventions
 

@@ -4,6 +4,7 @@
 
 #include <oboe/Oboe.h>
 
+#include "AccelVibrationDsp.h"
 #include "CalibrationEngine.h"
 
 #include <algorithm>
@@ -47,7 +48,7 @@ enum VibrationDisabledReason : int {
     VIB_REASON_CONFIG_DISABLED = 1,
     VIB_REASON_ACCEL_UNSUPPORTED = 2,
     VIB_REASON_LOW_RATE = 3,
-    VIB_REASON_DSP_PENDING = 4
+    VIB_REASON_FUSION_PENDING = 4
 };
 
 enum VibrationSourceMode : int {
@@ -74,15 +75,10 @@ static std::atomic<float>    g_accelSampleCount{0.0f};    // cumulative samples 
 static std::atomic<int>      g_accelSupported{-1};        // -1 unknown, 0 unsupported, 1 supported
 static std::atomic<float>    g_accelRequestedHz{0.0f};    // requested raw-accel rate from min-delay
 
-// ─── ADR 004 M2 accelerometer SPSC ring ─────────────────────────────────────
+// ─── ADR 004 accelerometer SPSC ring ────────────────────────────────────────
 // Sensor thread is the only producer. The DSP worker is the only consumer.
-// Entries are timestamped raw-ACCELEROMETER magnitudes; resampling/FFT/fusion
-// intentionally wait for M3+.
-
-struct AccelSample {
-    int64_t timestampNs;
-    float   magnitude;
-};
+// Entries are timestamped raw-ACCELEROMETER magnitudes. M3 consumes them in the
+// existing DSP worker for resampling + vibration FFT; fusion policy waits for M4.
 
 static AccelSample           g_accelRing[ACCEL_RING_SIZE]{};
 static std::atomic<uint32_t> g_accelRingWriteSeq{0};
@@ -129,8 +125,8 @@ static std::atomic<bool>     g_dspRunning{false};
 static CalibrationEngine g_calibEngine;
 
 // ─── ADR 004 vibration-fusion diagnostics ───────────────────────────────────
-// M2 adds the accelerometer SPSC ring only. FFT/fusion lands in later
-// milestones, so fusionActive remains false and source remains mic-primary.
+// M3 adds the vibration FFT estimate only. Fusion policy lands in M4, so
+// fusionActive remains false and source remains mic-primary.
 
 static std::atomic<bool>     g_vibrationFusionActive{false};
 static std::atomic<int>      g_vibrationDisabledReason{VIB_REASON_CONFIG_DISABLED};
@@ -144,22 +140,26 @@ static void updateVibrationFusionDiagnostics() {
     const float effHz = g_accelEffHz.load(std::memory_order_relaxed);
 
     g_vibrationFusionActive.store(false, std::memory_order_relaxed);
-    g_vibrationHz.store(0.0f, std::memory_order_relaxed);
-    g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
 
     if (!requested) {
+        g_vibrationHz.store(0.0f, std::memory_order_relaxed);
+        g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
         g_vibrationDisabledReason.store(VIB_REASON_CONFIG_DISABLED, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
     } else if (supported == 0) {
+        g_vibrationHz.store(0.0f, std::memory_order_relaxed);
+        g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
         g_vibrationDisabledReason.store(VIB_REASON_ACCEL_UNSUPPORTED, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
     } else if (effHz < ACCEL_RATE_GATE_HZ) {
+        g_vibrationHz.store(0.0f, std::memory_order_relaxed);
+        g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
         g_vibrationDisabledReason.store(VIB_REASON_LOW_RATE, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_REJECTED_LOW_RATE, std::memory_order_relaxed);
     } else {
-        // Rate gate is open, but M2 intentionally does not implement the
-        // vibration FFT or fusion policy yet.
-        g_vibrationDisabledReason.store(VIB_REASON_DSP_PENDING, std::memory_order_relaxed);
+        // Rate gate is open and M3 may publish f_vib/prominence, but M4 owns
+        // source selection and fusion into the mic-primary classification path.
+        g_vibrationDisabledReason.store(VIB_REASON_FUSION_PENDING, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
     }
 }
@@ -189,18 +189,49 @@ static inline void writeAccelRingSample(int64_t timestampNs, float magnitude) {
     g_accelRingWriteSeq.store(w + 1, std::memory_order_release);
 }
 
-static void drainAccelRingForDiagnostics() {
+static int drainAccelRingToWindow(AccelSample* window, int& head, int& count) {
     const uint32_t r = g_accelRingReadSeq.load(std::memory_order_relaxed);
     const uint32_t w = g_accelRingWriteSeq.load(std::memory_order_acquire);
     const uint32_t available = static_cast<uint32_t>(w - r);
-    if (available == 0) return;
+    if (!window || available == 0) return 0;
 
-    AccelSample last = g_accelRing[(w - 1) & ACCEL_RING_MASK];
-    if (std::isfinite(last.magnitude)) {
-        g_accelRingLatestMagnitude.store(last.magnitude, std::memory_order_relaxed);
+    uint32_t drained = 0;
+    for (uint32_t seq = r; seq != w; ++seq) {
+        const AccelSample sample = g_accelRing[seq & ACCEL_RING_MASK];
+        if (sample.timestampNs > 0 && std::isfinite(sample.magnitude)) {
+            window[head] = sample;
+            head = (head + 1) % ACCEL_VIBRATION_FFT_SIZE;
+            if (count < ACCEL_VIBRATION_FFT_SIZE) ++count;
+            g_accelRingLatestMagnitude.store(sample.magnitude, std::memory_order_relaxed);
+            ++drained;
+        }
     }
     g_accelRingRead.fetch_add(available, std::memory_order_relaxed);
     g_accelRingReadSeq.store(w, std::memory_order_release);
+    return static_cast<int>(drained);
+}
+
+static void copyAccelWindowOrdered(const AccelSample* window, int head, AccelSample* ordered) {
+    for (int i = 0; i < ACCEL_VIBRATION_FFT_SIZE; ++i) {
+        ordered[i] = window[(head + i) % ACCEL_VIBRATION_FFT_SIZE];
+    }
+}
+
+static bool accelVibrationEstimateEnabled() {
+    return g_useVibrationFusion.load(std::memory_order_relaxed) &&
+           g_accelSupported.load(std::memory_order_relaxed) == 1 &&
+           g_accelEffHz.load(std::memory_order_relaxed) >= ACCEL_RATE_GATE_HZ;
+}
+
+static void publishAccelVibrationEstimate(const AccelVibrationEstimate& estimate) {
+    if (estimate.valid) {
+        g_vibrationHz.store(estimate.hz, std::memory_order_relaxed);
+        g_vibrationProminence.store(estimate.prominence, std::memory_order_relaxed);
+    } else {
+        g_vibrationHz.store(0.0f, std::memory_order_relaxed);
+        g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
+    }
+    updateVibrationFusionDiagnostics();
 }
 
 // ─── JVM callback state ──────────────────────────────────────────────────────
@@ -219,32 +250,6 @@ static jmethodID g_onGearCalibrated = nullptr;  // static method; valid for proc
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_jvm = vm;
     return JNI_VERSION_1_6;
-}
-
-// ─── Inline radix-2 Cooley–Tukey FFT ─────────────────────────────────────────
-
-static void fft_inplace(std::vector<std::complex<float>>& a) {
-    const int n = static_cast<int>(a.size());
-    for (int i = 1, j = 0; i < n; ++i) {
-        int bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) std::swap(a[i], a[j]);
-    }
-    for (int len = 2; len <= n; len <<= 1) {
-        float ang = -2.0f * static_cast<float>(M_PI) / static_cast<float>(len);
-        std::complex<float> wlen(std::cos(ang), std::sin(ang));
-        for (int i = 0; i < n; i += len) {
-            std::complex<float> w(1.0f, 0.0f);
-            for (int j = 0; j < len / 2; ++j) {
-                std::complex<float> u = a[i + j];
-                std::complex<float> v = a[i + j + len / 2] * w;
-                a[i + j]           = u + v;
-                a[i + j + len / 2] = u - v;
-                w *= wlen;
-            }
-        }
-    }
 }
 
 // ─── DSP: find dominant frequency in engine band ──────────────────────────────
@@ -277,6 +282,12 @@ static float findDominantHz(const float* pcm, int len) {
 static void dspWorkerFn() {
     // Thread-local copy of the snapshot — avoids any overlap with the input callback.
     float localSnapshot[FFT_SIZE];
+    AccelSample accelWindow[ACCEL_VIBRATION_FFT_SIZE]{};
+    AccelSample accelOrdered[ACCEL_VIBRATION_FFT_SIZE]{};
+    AccelVibrationScratch accelScratch{};
+    int accelWindowHead = 0;
+    int accelWindowCount = 0;
+    int accelSamplesSinceEstimate = 0;
 
     // Attach the DSP worker to the JVM for the lifetime of the thread.
     // A per-callback attach/detach would be cheaper in the no-lock case but risks
@@ -291,7 +302,22 @@ static void dspWorkerFn() {
     }
 
     while (g_dspRunning.load(std::memory_order_relaxed)) {
-        drainAccelRingForDiagnostics();
+        const int drained = drainAccelRingToWindow(
+                accelWindow, accelWindowHead, accelWindowCount);
+        accelSamplesSinceEstimate += drained;
+
+        if (accelSamplesSinceEstimate >= ACCEL_VIBRATION_HOP_SIZE &&
+            accelWindowCount >= ACCEL_VIBRATION_FFT_SIZE) {
+            if (accelVibrationEstimateEnabled()) {
+                copyAccelWindowOrdered(accelWindow, accelWindowHead, accelOrdered);
+                const float accelHz = g_accelEffHz.load(std::memory_order_relaxed);
+                publishAccelVibrationEstimate(estimateAccelVibrationHz(
+                        accelOrdered, ACCEL_VIBRATION_FFT_SIZE, accelHz, accelScratch));
+            } else {
+                publishAccelVibrationEstimate({false, 0.0f, 0.0f, 0.0f});
+            }
+            accelSamplesSinceEstimate = 0;
+        }
 
         uint32_t w = g_dspWriteSeq.load(std::memory_order_acquire);
         uint32_t r = g_dspReadSeq.load(std::memory_order_relaxed);
