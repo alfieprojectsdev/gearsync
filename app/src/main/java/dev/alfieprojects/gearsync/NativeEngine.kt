@@ -30,11 +30,12 @@ object NativeEngine {
     @JvmStatic external fun nativeAccelProbeStats(): FloatArray?
 
     /**
-     * ADR 004 Milestone 1 diagnostic — vibration-fusion feature gate/state.
-     * Returns float[8]:
+     * ADR 004 diagnostic — vibration-fusion feature gate/state plus M2 accel ring.
+     * Returns float[12]:
      * [requestedAccelHz, measuredAccelHz, useVibrationFusion (1/0),
      *  fusionActive (1/0), disabledReasonCode, latestVibrationHz,
-     *  vibrationProminence, sourceModeCode].
+     *  vibrationProminence, sourceModeCode, accelRingWritten, accelRingRead,
+     *  accelRingDropped, latestAccelMagnitude].
      *
      * Reason codes: 0 none, 1 config disabled, 2 accelerometer unsupported,
      * 3 low accel rate, 4 DSP/fusion path not implemented yet.
