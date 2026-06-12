@@ -248,3 +248,14 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - DSP worker drains the accel ring for diagnostics only, preserving the single-DSP-worker design for later M3 processing.
 - Expanded `nativeVibrationFusionStats()` payload to include ring written/read/dropped counters and latest magnitude without adding a JNI method; parity remains 12 Kotlin externals to 12 native exports.
 - Verified: `./gradlew assembleDebug` **BUILD SUCCESSFUL** from the M2 worktree after copying ignored `local.properties` into the worktree.
+
+---
+
+## Session 2026-06-13 — ADR 004 M3 accel DSP estimate
+
+- Branched from updated `main` after PR #11/M2 merged: worktree `/home/finch/repos/gearsync/worktrees/codex-adr004-m3-accel-dsp`, branch `feat/adr004-m3-accel-dsp`.
+- Added pure C++ DSP helpers: shared project-owned radix-2 `fft_inplace` in `DspPrimitives.h`, plus `AccelVibrationDsp.h` for 256-sample accel resampling, DC subtraction, Hamming windowing, 15 Hz to min(160 Hz, Nyquist) band search, and peak/median prominence.
+- Reused the existing `dspWorkerFn` as the sole accel DSP consumer. The sensor thread remains allocation-free and only writes timestamped magnitudes to the SPSC ring.
+- M3 publishes diagnostic `latestVibrationHz` and `vibrationProminence` only when `useVibrationFusion` is true and the measured accel rate passes the 300 Hz gate. Fusion/source selection still waits for M4, so mic remains primary/default.
+- Added host test `test_accel_vibration_host.cpp`: jittered 50 Hz recovery, insufficient samples invalid, Nyquist-below-band invalid, and 160 Hz hard-cap behavior.
+- Verified: `test_accel_vibration_host` pass, existing `test_ransac_host` pass, JNI parity remains 12 Kotlin externals to 12 native exports, and `./gradlew assembleDebug` **BUILD SUCCESSFUL**.

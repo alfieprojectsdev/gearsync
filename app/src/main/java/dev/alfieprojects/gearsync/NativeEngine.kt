@@ -30,7 +30,7 @@ object NativeEngine {
     @JvmStatic external fun nativeAccelProbeStats(): FloatArray?
 
     /**
-     * ADR 004 diagnostic — vibration-fusion feature gate/state plus M2 accel ring.
+     * ADR 004 diagnostic — vibration-fusion feature gate/state plus M3 accel FFT estimate.
      * Returns float[12]:
      * [requestedAccelHz, measuredAccelHz, useVibrationFusion (1/0),
      *  fusionActive (1/0), disabledReasonCode, latestVibrationHz,
@@ -38,7 +38,7 @@ object NativeEngine {
      *  accelRingDropped, latestAccelMagnitude].
      *
      * Reason codes: 0 none, 1 config disabled, 2 accelerometer unsupported,
-     * 3 low accel rate, 4 DSP/fusion path not implemented yet.
+     * 3 low accel rate, 4 fusion policy pending (f_vib is diagnostic-only).
      * Source modes: 0 MIC_ONLY, 1 FUSED, 2 VIB_REJECTED_LOW_RATE,
      * 3 VIB_REJECTED_LOW_PROMINENCE.
      */
