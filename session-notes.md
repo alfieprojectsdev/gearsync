@@ -259,3 +259,15 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - M3 publishes diagnostic `latestVibrationHz` and `vibrationProminence` only when `useVibrationFusion` is true and the measured accel rate passes the 300 Hz gate. Fusion/source selection still waits for M4, so mic remains primary/default.
 - Added host test `test_accel_vibration_host.cpp`: jittered 50 Hz recovery, insufficient samples invalid, Nyquist-below-band invalid, and 160 Hz hard-cap behavior.
 - Verified: `test_accel_vibration_host` pass, existing `test_ransac_host` pass, JNI parity remains 12 Kotlin externals to 12 native exports, and `./gradlew assembleDebug` **BUILD SUCCESSFUL**.
+
+---
+
+## Session 2026-06-13 — ADR 004 M4 mic-primary fusion (Claude)
+
+- Worktree `/home/finch/repos/gearsync/worktrees/claude-adr004-m4-fusion`, branch `feat/adr004-m4-fusion`, off `main` after #12/M3 merged (`3ddbd5e`). Claude took M4 (break from codex-owns-the-whole-chain) per session decision; M5 harmonic guard stays codex's and must land *after* M4 — both touch `native-lib.cpp`, no parallel.
+- New `FusionPolicy.h`: pure, host-testable `selectFusedHz(micHz, micProm, vibValid, vibHz, vibProm, gateOpen)`. Mic primary always; on agreement (|Δ|/micHz ≤ 10%) prominence-weighted blend; on disagreement keep mic unless vib clearly stronger (`>2×`) AND mic weak (`<2.0`); reject implausible/low-prominence vib. Returns `{selectedHz, sourceMode, fused}`.
+- `findDominantHz` extended with optional `outProminence` (peak/median-band, same metric as the accel estimate) so mic and vibration confidences are comparable. DSP-worker-only alloc, consistent with the existing `buf` vector.
+- `dspWorkerFn` PCM block now computes `selectedHz` via `selectFusedHz` and feeds `ratio = selectedHz/speed` into the unchanged Welford/classifyGear/needle path (guided `feedCalibrationSample` also uses `selectedHz`). The per-frame decision is authoritative for `g_vibrationSourceMode`/`g_vibrationFusionActive`; `updateVibrationFusionDiagnostics` open-gate branch now only sets `VIB_REASON_NONE` and no longer clobbers source/active.
+- Diagnostics: retired `VIB_REASON_FUSION_PENDING` (4); gate-open reason is now `VIB_REASON_NONE` (0). Added `VIB_SOURCE_REJECTED_DISAGREEMENT` (4); `static_assert` keeps `VibrationSourceMode` ↔ `FusionPolicy.h::FusionSourceMode` in lockstep. No new JNI method — parity stays 12↔12. Updated `NativeEngine.kt` doc + `CLAUDE.md`.
+- Fusion-off path is bit-for-bit legacy mic-only (first branch of `selectFusedHz` returns micHz untouched).
+- Added host test `test_fusion_policy_host.cpp` (6 cases: fusion-off, agreement-blend, low-prominence, implausible, disagreement-strong-mic, disagreement-weak-mic). Verified: fusion 6/6, `test_accel_vibration_host` + `test_ransac_host` regressions pass.
