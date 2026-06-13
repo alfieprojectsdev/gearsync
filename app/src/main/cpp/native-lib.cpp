@@ -6,6 +6,7 @@
 
 #include "AccelVibrationDsp.h"
 #include "CalibrationEngine.h"
+#include "FusionPolicy.h"
 
 #include <algorithm>
 #include <atomic>
@@ -44,19 +45,25 @@ static constexpr uint32_t ACCEL_RING_MASK  = ACCEL_RING_SIZE - 1;
 static_assert((ACCEL_RING_SIZE & ACCEL_RING_MASK) == 0, "ACCEL_RING_SIZE must be power of two");
 
 enum VibrationDisabledReason : int {
-    VIB_REASON_NONE = 0,
+    VIB_REASON_NONE = 0,             // gate open; fusion live (M4)
     VIB_REASON_CONFIG_DISABLED = 1,
     VIB_REASON_ACCEL_UNSUPPORTED = 2,
-    VIB_REASON_LOW_RATE = 3,
-    VIB_REASON_FUSION_PENDING = 4
+    VIB_REASON_LOW_RATE = 3
 };
 
+// Numerically mirrored by FusionSourceMode in FusionPolicy.h.
 enum VibrationSourceMode : int {
     VIB_SOURCE_MIC_ONLY = 0,
     VIB_SOURCE_FUSED = 1,
     VIB_SOURCE_REJECTED_LOW_RATE = 2,
-    VIB_SOURCE_REJECTED_LOW_PROMINENCE = 3
+    VIB_SOURCE_REJECTED_LOW_PROMINENCE = 3,
+    VIB_SOURCE_REJECTED_DISAGREEMENT = 4
 };
+static_assert(VIB_SOURCE_MIC_ONLY == FUSION_SRC_MIC_ONLY &&
+              VIB_SOURCE_FUSED == FUSION_SRC_FUSED &&
+              VIB_SOURCE_REJECTED_LOW_PROMINENCE == FUSION_SRC_REJECTED_LOW_PROMINENCE &&
+              VIB_SOURCE_REJECTED_DISAGREEMENT == FUSION_SRC_REJECTED_DISAGREEMENT,
+              "VibrationSourceMode must stay in lockstep with FusionSourceMode");
 
 // ─── Shared state (atomic where possible) ────────────────────────────────────
 
@@ -139,28 +146,30 @@ static void updateVibrationFusionDiagnostics() {
     const int supported = g_accelSupported.load(std::memory_order_relaxed);
     const float effHz = g_accelEffHz.load(std::memory_order_relaxed);
 
-    g_vibrationFusionActive.store(false, std::memory_order_relaxed);
-
     if (!requested) {
+        g_vibrationFusionActive.store(false, std::memory_order_relaxed);
         g_vibrationHz.store(0.0f, std::memory_order_relaxed);
         g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
         g_vibrationDisabledReason.store(VIB_REASON_CONFIG_DISABLED, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
     } else if (supported == 0) {
+        g_vibrationFusionActive.store(false, std::memory_order_relaxed);
         g_vibrationHz.store(0.0f, std::memory_order_relaxed);
         g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
         g_vibrationDisabledReason.store(VIB_REASON_ACCEL_UNSUPPORTED, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
     } else if (effHz < ACCEL_RATE_GATE_HZ) {
+        g_vibrationFusionActive.store(false, std::memory_order_relaxed);
         g_vibrationHz.store(0.0f, std::memory_order_relaxed);
         g_vibrationProminence.store(0.0f, std::memory_order_relaxed);
         g_vibrationDisabledReason.store(VIB_REASON_LOW_RATE, std::memory_order_relaxed);
         g_vibrationSourceMode.store(VIB_SOURCE_REJECTED_LOW_RATE, std::memory_order_relaxed);
     } else {
-        // Rate gate is open and M3 may publish f_vib/prominence, but M4 owns
-        // source selection and fusion into the mic-primary classification path.
-        g_vibrationDisabledReason.store(VIB_REASON_FUSION_PENDING, std::memory_order_relaxed);
-        g_vibrationSourceMode.store(VIB_SOURCE_MIC_ONLY, std::memory_order_relaxed);
+        // Gate open: M3 has published f_vib/prominence. The per-frame fusion
+        // decision in dspWorkerFn owns g_vibrationSourceMode / g_vibrationFusionActive
+        // (it runs after this on the same thread and persists between PCM frames),
+        // so this only sets the disabled-reason. Do not clobber source/active here.
+        g_vibrationDisabledReason.store(VIB_REASON_NONE, std::memory_order_relaxed);
     }
 }
 
@@ -254,7 +263,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
 
 // ─── DSP: find dominant frequency in engine band ──────────────────────────────
 
-static float findDominantHz(const float* pcm, int len) {
+// outProminence (optional, ADR 004 M4): peak / median-band-magnitude — the same
+// confidence metric the vibration estimate reports, so the fusion policy can
+// weight mic vs. vibration symmetrically.
+static float findDominantHz(const float* pcm, int len, float* outProminence = nullptr) {
     std::vector<std::complex<float>> buf(len);
     for (int i = 0; i < len; ++i) {
         float w = 0.54f - 0.46f * std::cos(2.0f * static_cast<float>(M_PI) * i / (len - 1));
@@ -264,6 +276,7 @@ static float findDominantHz(const float* pcm, int len) {
 
     int binMin = static_cast<int>(MIN_ENGINE_HZ * len / SAMPLE_RATE);
     int binMax = static_cast<int>(MAX_ENGINE_HZ * len / SAMPLE_RATE);
+    binMin     = std::max(1, binMin);
     binMax     = std::min(binMax, len / 2 - 1);
 
     float peakMag = 0.0f;
@@ -272,6 +285,24 @@ static float findDominantHz(const float* pcm, int len) {
         float mag = std::abs(buf[b]);
         if (mag > peakMag) { peakMag = mag; peakBin = b; }
     }
+
+    if (outProminence) {
+        float prominence = 0.0f;
+        if (binMax >= binMin && peakMag > 0.0f) {
+            // Median band magnitude as the noise floor (nth_element). This runs on
+            // the DSP worker, which already heap-allocates `buf` above — not a
+            // wait-free path, so the small band vector is acceptable here.
+            const int count = binMax - binMin + 1;
+            std::vector<float> band(count);
+            for (int b = binMin; b <= binMax; ++b) band[b - binMin] = std::abs(buf[b]);
+            const int mid = count / 2;
+            std::nth_element(band.begin(), band.begin() + mid, band.end());
+            const float noiseFloor = std::max(band[mid], 1.0e-6f);
+            prominence = peakMag / noiseFloor;
+        }
+        *outProminence = prominence;
+    }
+
     return static_cast<float>(peakBin) * SAMPLE_RATE / static_cast<float>(len);
 }
 
@@ -333,12 +364,29 @@ static void dspWorkerFn() {
         std::memcpy(localSnapshot, g_dspSnapshot, sizeof(localSnapshot));
         g_dspReadSeq.store(w, std::memory_order_relaxed);  // slot is now free for next snapshot
 
-        float hz    = findDominantHz(localSnapshot, FFT_SIZE);
-        float speed = g_gpsSpeed.load();
-        g_dominantHz.store(hz);
+        float micProm = 0.0f;
+        float hz      = findDominantHz(localSnapshot, FFT_SIZE, &micProm);
+        float speed   = g_gpsSpeed.load();
+        g_dominantHz.store(hz);  // diagnostic stays the raw mic peak
+
+        // ─── ADR 004 M4 — mic-primary fusion ─────────────────────────────────
+        // The gate mirrors accelVibrationEstimateEnabled(); when closed, selectFusedHz
+        // returns the mic estimate untouched (fusion-off == legacy mic-only path).
+        const bool  gateOpen = accelVibrationEstimateEnabled();
+        const float vibHz    = g_vibrationHz.load(std::memory_order_relaxed);
+        const float vibProm  = g_vibrationProminence.load(std::memory_order_relaxed);
+        const bool  vibValid = gateOpen && vibHz > 0.0f && vibProm > 0.0f;
+        const FusionDecision fd =
+                selectFusedHz(hz, micProm, vibValid, vibHz, vibProm, gateOpen);
+        const float selectedHz = fd.selectedHz;
+
+        // This per-frame decision is authoritative for the source/active diagnostics
+        // (updateVibrationFusionDiagnostics defers to it while the gate is open).
+        g_vibrationSourceMode.store(fd.sourceMode, std::memory_order_relaxed);
+        g_vibrationFusionActive.store(fd.fused, std::memory_order_relaxed);
 
         if (speed >= MIN_SPEED_MPS) {
-            float ratio     = hz / speed;
+            float ratio     = selectedHz / speed;
             int   stableReq = g_stabilityWindowSamples.load(std::memory_order_relaxed);
             int   stable    = g_speedStableCount.load(std::memory_order_relaxed);
 
@@ -355,7 +403,7 @@ static void dspWorkerFn() {
                     // only the last sample — which the asymmetric band can map to -1 or a
                     // neighbour even on a good fit, misreporting the lock. (ref: DL-003)
                     calibratingGear = g_calibEngine.calibratingGear();
-                    locked = g_calibEngine.feedCalibrationSample(speed, hz);
+                    locked = g_calibEngine.feedCalibrationSample(speed, selectedHz);
                 } else {
                     g_calibEngine.updateWelford(ratio);
                 }
