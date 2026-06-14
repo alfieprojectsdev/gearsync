@@ -30,17 +30,23 @@ object NativeEngine {
     @JvmStatic external fun nativeAccelProbeStats(): FloatArray?
 
     /**
-     * ADR 004 diagnostic — vibration-fusion feature gate/state plus M3 accel FFT estimate.
+     * ADR 004 diagnostic — vibration-fusion feature gate/state plus M3 accel FFT
+     * estimate and the M4 mic-primary fusion decision.
      * Returns float[12]:
      * [requestedAccelHz, measuredAccelHz, useVibrationFusion (1/0),
      *  fusionActive (1/0), disabledReasonCode, latestVibrationHz,
      *  vibrationProminence, sourceModeCode, accelRingWritten, accelRingRead,
      *  accelRingDropped, latestAccelMagnitude].
      *
-     * Reason codes: 0 none, 1 config disabled, 2 accelerometer unsupported,
-     * 3 low accel rate, 4 fusion policy pending (f_vib is diagnostic-only).
+     * fusionActive is 1 only when the vibration estimate actually influenced the
+     * selected frequency this frame; mic remains primary/default.
+     *
+     * Reason codes: 0 none (gate open, fusion live), 1 config disabled,
+     * 2 accelerometer unsupported, 3 low accel rate.
      * Source modes: 0 MIC_ONLY, 1 FUSED, 2 VIB_REJECTED_LOW_RATE,
-     * 3 VIB_REJECTED_LOW_PROMINENCE.
+     * 3 VIB_REJECTED_LOW_PROMINENCE (also invalid/implausible f_vib),
+     * 4 VIB_REJECTED_DISAGREEMENT (mic kept; vibration disagreed but was not a
+     * clearly-stronger override of a weak mic).
      */
     @JvmStatic external fun nativeVibrationFusionStats(): FloatArray?
 
