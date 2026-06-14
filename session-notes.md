@@ -282,9 +282,30 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 
 ---
 
+## Session 2026-06-14 — ADR 004 M5 harmonic guard (Claude)
+
+- #13 (M4) and #14 (ADR 005) merged; `main` @ `1ac460c`. Worktree `worktrees/claude-adr004-m5-harmonic`, branch `feat/adr004-m5-harmonic` off updated `main`.
+- **M5 harmonic guard** (required, DL-008) in `AccelVibrationDsp.h`: added owned `estimateFundamentalAcfHz` — normalized autocorrelation over the lag range for `[15, bandMax]` Hz, picks the **smallest** lag whose ACF peak is within 85% of the ACF max (avoids the classic ACF octave-down/subharmonic error). In `estimateAccelVibrationHz`, after the FFT peak, if `fftHz ≈ N×f_acf` (N∈{2,3}, tol 0.15) with ACF strength ≥ 0.40 and `f_acf ≥ MIN_HZ`, correct `f_vib` down to the fundamental; otherwise keep the FFT estimate untouched. No new deps, allocation-free (added `detrended`/`acf` scratch fields), still worker-local.
+- Rationale: chassis vibration is harmonic-rich; the mount can resonate a 2×/3× firing harmonic stronger than the true fundamental (both in the 15–160 Hz band) and the bare FFT picker latches it. ACF recovers the true period. phyphox = ideas-only (GPLv3), no copied code.
+- Host tests (`test_accel_vibration_host.cpp`, +2): `test_harmonic_guard_corrects_2x_to_fundamental` (dominant 80 Hz 2× over 40 Hz fundamental → corrected to ~40), `test_harmonic_guard_keeps_clean_fundamental` (clean 60 Hz tone unchanged, not dragged to a subharmonic). Verified: accel 6/6, `test_fusion_policy_host` + `test_ransac_host` regressions pass, `./gradlew assembleDebug` **BUILD SUCCESSFUL** (APK 9.86 MB). JNI parity unchanged 12↔12 (M5 is internal DSP, no JNI surface change).
+- **Next:** **M6** — end-to-end on-device validation (physical arm64, C-008): confirm probe ~400 Hz in-app, vibration estimate tracks firing freq across the rev range, harmonic guard behaves on real chassis data, fusion improves robustness vs mic-only with window open / radio on. Threshold tuning (`FUSION_AGREE_TOL`, ACF constants) against real drives — ADR 005 OBD oracle would provide the ground truth.
+
+---
+
+## Session 2026-06-14 — M6 test-drive enablement (Claude)
+
+- Goal: ship a usable, test-drivable gearsync for the Wigo. Audited the app end-to-end — it builds, the permission/service/VU-render path is complete, launcher icons exist (adaptive `mipmap-anydpi-v26`, minSdk 26 → the "add icons" open item is **stale**), `vehicle_config.json` is correctly Wigo-tuned, `onGearCalibrated` is wired. No build/runtime blockers.
+- **Key gap for a *meaningful* M6:** `useVibrationFusion` defaults **false**, so the shipped build runs mic-only and validates none of the M1–M5 work. Built a dedicated **test-drive APK with fusion ON** → repo root `gearsync-testdrive-fusion.apk` (full M1–M5 pipeline + harmonic guard active). The committed default stays off (flip only after M6 confirms fusion helps — that's the whole point of M6).
+- Branch `feat/m6-drive-diagnostics` (off M5 tip, stacked): added a **debug-only periodic fusion-diagnostics logcat** in `ShiftAssistantService` (Handler @ 2 s, `BuildConfig.DEBUG`-gated, off the realtime path, VU meter untouched). Logs `accelHz/fusion/active/reason/vibHz/prom/src | micHz/speed/gear/needle` under tag `ShiftAssistant` so the drive is verifiable via `adb logcat -s ShiftAssistant` instead of driving blind.
+- Added `docs/TEST-DRIVE.md`: install, mount, permissions, drive procedure, the two logcat lines that matter, and pass criteria (probe ≥300 Hz, vibHz tracks micHz, no 2×/3× ghost, steadier needle under window/radio noise).
+- Verified `./gradlew assembleDebug` BUILD SUCCESSFUL (test APK 9.89 MB). M5 PR stays pure (harmonic guard only); diagnostics are this separate stacked branch.
+- **Remaining = the physical drive (M6).** Nothing more is buildable remotely: the app is complete and the test APK is ready. ADR 005 OBD oracle stays an optional accessory (plan pushed, not required to drive).
+
+---
+
 ## Session 2026-06-14 — VU meter UI polish (Claude, ownership transferred)
 
-- VU-meter UI ownership transferred from codex (suspended) to Claude this session. Branch `feat/vumeter-ui-polish` off `main` (`1ac460c`).
+- VU-meter UI ownership transferred from codex (suspended) to Claude this session. Branch `feat/vumeter-ui-polish` off `main`.
 - Impeccable-aligned, glanceability-first changes to `VUMeterView.kt` + `colors.xml` (mechanics/state contract/60 FPS loop untouched, alloc-free onDraw preserved via reused `RectF`):
   - **Tinted inactive segment** `#2A2A2A` → `#171B2E` (blue-charcoal, cohesive with the dial bg; no flat gray).
   - **Rounded segments** (`drawRoundRect`, corner = 0.22 × min dim).

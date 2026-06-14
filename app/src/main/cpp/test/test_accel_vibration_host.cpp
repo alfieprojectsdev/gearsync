@@ -86,11 +86,62 @@ static void test_band_hard_caps_at_160hz() {
                 estimate.hz, estimate.bandMaxHz);
 }
 
+// M5: fundamental + dominant 2nd harmonic. The chassis resonates the 2x harmonic
+// stronger than the firing fundamental, so the bare FFT peak sits at 2x.
+static void fillHarmonic(AccelSample* samples,
+                         int count,
+                         float sampleRateHz,
+                         float fundamentalHz,
+                         float fundAmp,
+                         float harmonicMult,
+                         float harmonicAmp) {
+    const double stepNs = 1.0e9 / static_cast<double>(sampleRateHz);
+    const double offsetNs = 1.0e9;
+    for (int i = 0; i < count; ++i) {
+        const double tNs = offsetNs + static_cast<double>(i) * stepNs;
+        const double tSec = tNs / 1.0e9;
+        const float ph = 2.0f * static_cast<float>(M_PI) * static_cast<float>(tSec);
+        samples[i].timestampNs = static_cast<int64_t>(std::llround(tNs));
+        samples[i].magnitude = 9.81f +
+                fundAmp * std::sin(ph * fundamentalHz) +
+                harmonicAmp * std::sin(ph * fundamentalHz * harmonicMult);
+    }
+}
+
+// M5: FFT peak at 80 Hz (dominant 2x), true fundamental 40 Hz — guard corrects down.
+static void test_harmonic_guard_corrects_2x_to_fundamental() {
+    AccelSample samples[ACCEL_VIBRATION_FFT_SIZE]{};
+    AccelVibrationScratch scratch{};
+    fillHarmonic(samples, ACCEL_VIBRATION_FFT_SIZE, 400.0f,
+                 /*fundamental*/40.0f, /*fundAmp*/0.5f, /*mult*/2.0f, /*harmAmp*/1.6f);
+
+    const auto estimate = estimateAccelVibrationHz(
+            samples, ACCEL_VIBRATION_FFT_SIZE, 400.0f, scratch);
+    assert(estimate.valid);
+    assert(std::fabs(estimate.hz - 40.0f) <= 3.0f);  // corrected to fundamental, not 80
+    std::printf("PASS test_harmonic_guard_corrects_2x_to_fundamental: hz=%.2f\n", estimate.hz);
+}
+
+// M5: a clean single tone (no strong harmonic) must NOT be dragged to a subharmonic.
+static void test_harmonic_guard_keeps_clean_fundamental() {
+    AccelSample samples[ACCEL_VIBRATION_FFT_SIZE]{};
+    AccelVibrationScratch scratch{};
+    fillTone(samples, ACCEL_VIBRATION_FFT_SIZE, 400.0f, 60.0f, 0.10f);
+
+    const auto estimate = estimateAccelVibrationHz(
+            samples, ACCEL_VIBRATION_FFT_SIZE, 400.0f, scratch);
+    assert(estimate.valid);
+    assert(std::fabs(estimate.hz - 60.0f) <= 2.0f);  // unchanged
+    std::printf("PASS test_harmonic_guard_keeps_clean_fundamental: hz=%.2f\n", estimate.hz);
+}
+
 int main() {
     test_jittered_50hz_recovers_peak();
     test_insufficient_samples_invalid();
     test_nyquist_below_band_invalid();
     test_band_hard_caps_at_160hz();
+    test_harmonic_guard_corrects_2x_to_fundamental();
+    test_harmonic_guard_keeps_clean_fundamental();
     std::printf("All accel vibration tests passed.\n");
     return 0;
 }

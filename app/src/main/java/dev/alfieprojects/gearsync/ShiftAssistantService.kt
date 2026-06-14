@@ -6,8 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
@@ -40,15 +42,47 @@ class ShiftAssistantService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         startLocationUpdates()
+        if (BuildConfig.DEBUG) diagHandler.post(diagLogger)
         return START_STICKY
     }
 
     override fun onDestroy() {
         fusedLocationClient.removeLocationUpdates(locationCallback)
+        diagHandler.removeCallbacks(diagLogger)
         persistCalibrationState()
         NativeEngine.stopEngine()
         isRunning = false
         super.onDestroy()
+    }
+
+    // ─── M6 drive diagnostics (debug builds only) ─────────────────────────────
+    // Periodic logcat of the ADR 004 fusion state so an on-road test drive can be
+    // validated without a UI overlay: filter with `adb logcat -s ShiftAssistant`.
+    // Off the realtime/audio path; does not touch the VU meter.
+
+    private val diagHandler = Handler(Looper.getMainLooper())
+    private val diagLogger = object : Runnable {
+        override fun run() {
+            logDriveDiagnostics()
+            diagHandler.postDelayed(this, DIAG_INTERVAL_MS)
+        }
+    }
+
+    private fun logDriveDiagnostics() {
+        val f = NativeEngine.nativeVibrationFusionStats() ?: return
+        if (f.size < 8) return
+        val vu = NativeEngine.getVUMeterState()
+        val needle = vu?.getOrNull(0) ?: 0f
+        val micHz  = vu?.getOrNull(1) ?: 0f
+        val speed  = vu?.getOrNull(2) ?: 0f
+        val gear   = vu?.getOrNull(3) ?: 0f
+        // f: [reqHz, measHz, useFusion, fusionActive, reason, vibHz, vibProm, srcMode, ...]
+        Log.i(
+            TAG,
+            "drive accelHz=%.0f fusion=%.0f active=%.0f reason=%.0f vibHz=%.1f prom=%.2f src=%.0f | micHz=%.1f speed=%.1f gear=%.0f needle=%.2f".format(
+                f[1], f[2], f[3], f[4], f[5], f[6], f[7], micHz, speed, gear, needle
+            )
+        )
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -139,6 +173,8 @@ class ShiftAssistantService : Service() {
         private const val NOTIFICATION_ID        = 1
         private const val CHANNEL_ID             = "gearsync_fg"
         private const val PREFS_NAME             = "gearsync_calibration"
+        private const val TAG                    = "ShiftAssistant"  // matches native LOG_TAG
+        private const val DIAG_INTERVAL_MS       = 2_000L            // M6 drive diagnostics cadence
         // 3 Welford fields + 5 gear ratios + 5 pin flags = 13 floats.
         // CalibrationEngine.deserialise accepts the old 8-float format by defaulting
         // missing pin flags to 0.0 (unpinned). (ref: DL-002, R-002)
