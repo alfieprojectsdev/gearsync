@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.View
@@ -41,8 +42,21 @@ class VUMeterView @JvmOverloads constructor(
     private val inactiveSegmentColor = context.getColor(R.color.vu_inactive_segment)
     private val lugAmbientColor     = context.getColor(R.color.vu_ambient_lug_base)
     private val shiftAmbientColor   = context.getColor(R.color.vu_ambient_shift_base)
+    private val needleEdgeColor     = context.getColor(R.color.vu_needle_edge)
+    private val targetMarkerColor   = context.getColor(R.color.vu_target_marker)
+
+    // Reused per-frame to avoid allocation in onDraw.
+    private val segmentRect   = RectF()
 
     private val segmentPaint  = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val needleEdgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = needleEdgeColor
+        style = Paint.Style.FILL
+    }
+    private val targetMarkerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = targetMarkerColor
         style = Paint.Style.FILL
     }
     private val flashPaint    = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -126,6 +140,8 @@ class VUMeterView @JvmOverloads constructor(
 
         drawPeripheralWash(canvas, alertFill)
         drawSegments(canvas, fill)
+        drawTargetMarker(canvas)
+        drawNeedleEdge(canvas, fill)
         drawGearLabel(canvas)
     }
 
@@ -157,6 +173,7 @@ class VUMeterView @JvmOverloads constructor(
         val segmentWidth = (meterWidth - gap * (SEGMENT_COUNT - 1)) / SEGMENT_COUNT
         val top = meterHeight * 0.18f
         val bottom = meterHeight * 0.72f
+        val radius = (minOf(segmentWidth, bottom - top) * CORNER_FRACTION)
         val activeSegments = (fill * SEGMENT_COUNT + 0.999f).toInt().coerceIn(0, SEGMENT_COUNT)
 
         var left = 0f
@@ -168,15 +185,48 @@ class VUMeterView @JvmOverloads constructor(
                 else -> shiftSegmentColor
             }
             val right = left + segmentWidth
-            canvas.drawRect(left, top, right, bottom, segmentPaint)
+            segmentRect.set(left, top, right, bottom)
+            canvas.drawRoundRect(segmentRect, radius, radius, segmentPaint)
 
             if (flashAlpha > 0f && i < activeSegments && i >= OPT_SEGMENTS) {
                 flashPaint.alpha = (flashAlpha * 0.35f).toInt().coerceIn(0, 90)
-                canvas.drawRect(left, top, right, bottom, flashPaint)
+                canvas.drawRoundRect(segmentRect, radius, radius, flashPaint)
             }
 
             left = right + gap
         }
+    }
+
+    // Bright vertical cap at the fill boundary — a "needle tip" the eye catches in
+    // peripheral vision even when the segment colours blur together at a glance.
+    private fun drawNeedleEdge(canvas: Canvas, fill: Float) {
+        val activeSegments = (fill * SEGMENT_COUNT + 0.999f).toInt().coerceIn(0, SEGMENT_COUNT)
+        if (activeSegments <= 0) return
+
+        val meterHeight = height.toFloat()
+        val gap = SEGMENT_GAP_PX
+        val segmentWidth = (width.toFloat() - gap * (SEGMENT_COUNT - 1)) / SEGMENT_COUNT
+        val top = meterHeight * 0.14f
+        val bottom = meterHeight * 0.76f
+        // Right edge of the last active segment.
+        val edgeX = activeSegments * (segmentWidth + gap) - gap
+        val half = NEEDLE_EDGE_WIDTH_PX / 2f
+        segmentRect.set(edgeX - half, top, edgeX + half, bottom)
+        canvas.drawRoundRect(segmentRect, half, half, needleEdgePaint)
+    }
+
+    // Static amber marker at the optimal→redline boundary: the upshift point.
+    private fun drawTargetMarker(canvas: Canvas) {
+        val meterHeight = height.toFloat()
+        val gap = SEGMENT_GAP_PX
+        val segmentWidth = (width.toFloat() - gap * (SEGMENT_COUNT - 1)) / SEGMENT_COUNT
+        val top = meterHeight * 0.10f
+        val bottom = meterHeight * 0.80f
+        // Centre of the gap between the last optimal and first redline segment.
+        val markerX = OPT_SEGMENTS * (segmentWidth + gap) - gap / 2f
+        val half = TARGET_MARKER_WIDTH_PX / 2f
+        segmentRect.set(markerX - half, top, markerX + half, bottom)
+        canvas.drawRoundRect(segmentRect, half, half, targetMarkerPaint)
     }
 
     private fun drawGearLabel(canvas: Canvas) {
@@ -198,6 +248,9 @@ class VUMeterView @JvmOverloads constructor(
         private const val LUG_SEGMENTS = 8
         private const val OPT_SEGMENTS = 16
         private const val SEGMENT_GAP_PX = 6f
+        private const val CORNER_FRACTION = 0.22f          // segment corner rounding
+        private const val NEEDLE_EDGE_WIDTH_PX = 7f        // bright fill-boundary cap
+        private const val TARGET_MARKER_WIDTH_PX = 5f      // upshift-point tick
 
         private const val LUG_END = 0.33f
         private const val OPT_END = 0.66f
@@ -205,11 +258,11 @@ class VUMeterView @JvmOverloads constructor(
         private const val LUG_MAX_ALPHA = 89
         private const val SHIFT_RAMP_MAX_ALPHA = 64
         private const val PULSE_MIN_ALPHA = 38
-        private const val PULSE_MAX_ALPHA = 128
+        private const val PULSE_MAX_ALPHA = 150            // stronger redline urgency
         private const val PULSE_HZ = 4.0
         private const val TWO_PI = 2.0 * PI
 
-        private const val NEUTRAL_LABEL = "N/??"
+        private const val NEUTRAL_LABEL = "—"
         private val GEAR_LABELS = arrayOf(
             NEUTRAL_LABEL,
             "G1",

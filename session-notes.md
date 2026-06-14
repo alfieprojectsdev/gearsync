@@ -279,3 +279,17 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - **ADR 005 drafted** (`adr.md` stub, PR #14): optional, default-off OBD-II ground-truth oracle for one-time calibration seeding (true RPM via generic PIDs 0x0C/0x0D → exact gear ratios, kills cold-start) and offline fusion-error validation. Kotlin/BT only, isolated from the native realtime core; mic+accel stays the no-hardware default. Origin: r/shittyprogramming feedback (chateau86 + DarkRonin00) that OBD-II already exposes mandatory RPM/speed. Implementation parked (low urgency, independent of the accel chain).
 - **gh/git auto-run fix:** `.claude/settings.json` allow-list rewritten with correct colon syntax (`Bash(gh pr create:*)`, `Bash(git worktree:*)`, `git branch/merge/fetch:*`, etc.) so git/gh writes run without manual `!` prompts. Caveats: settings load at session **start** (mid-session edits need a restart); network writes (`git push`, `gh`) need `dangerouslyDisableSandbox: true`; write commands must be **non-compound** (no pipes/`2>&1`/heredoc — use temp files + `git commit -F` / `gh pr create --body-file`). PRs #13/#14 were created via `!` because the new rules hadn't reloaded; subsequent sessions auto-run.
 - **Next:** land #13 (M4) + #14 (ADR 005) → implement **M5 harmonic guard** (Claude, here) off updated `main` → **M6** end-to-end device validation (needs physical arm64, C-008).
+
+---
+
+## Session 2026-06-14 — VU meter UI polish (Claude, ownership transferred)
+
+- VU-meter UI ownership transferred from codex (suspended) to Claude this session. Branch `feat/vumeter-ui-polish` off `main` (`1ac460c`).
+- Impeccable-aligned, glanceability-first changes to `VUMeterView.kt` + `colors.xml` (mechanics/state contract/60 FPS loop untouched, alloc-free onDraw preserved via reused `RectF`):
+  - **Tinted inactive segment** `#2A2A2A` → `#171B2E` (blue-charcoal, cohesive with the dial bg; no flat gray).
+  - **Rounded segments** (`drawRoundRect`, corner = 0.22 × min dim).
+  - **Needle-edge highlight**: bright near-white cap (`vu_needle_edge`) at the fill boundary — the "needle tip" the eye tracks in peripheral vision.
+  - **Upshift target marker**: static amber tick (`vu_target_marker` `#FFC400`) at the optimal→redline boundary = "shift here".
+  - Stronger redline pulse (`PULSE_MAX_ALPHA` 128→150); cleaner neutral label `N/??` → `—`.
+- Verified visually via the **sweep build** (`./gradlew assembleSweep` → repo-root `gearsync-sweep-ui.apk`) — animates the meter with synthetic data on-desk, no car. Build SUCCESSFUL.
+- No device render verification beyond sweep; on-road look confirmed during ADR 004 M6 drive.

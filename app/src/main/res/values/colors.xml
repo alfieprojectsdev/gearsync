@@ -8,7 +8,13 @@
     <color name="vu_lug_segment">#00D4FF</color>
     <color name="vu_opt_segment">#00E676</color>
     <color name="vu_shift_segment">#FF1744</color>
-    <color name="vu_inactive_segment">#2A2A2A</color>
+    <!-- Inactive: blue-charcoal tinted to the dial background, not a flat gray. -->
+    <color name="vu_inactive_segment">#171B2E</color>
+
+    <!-- Bright cap drawn at the fill boundary — the "needle tip" the eye tracks. -->
+    <color name="vu_needle_edge">#F5FBFF</color>
+    <!-- Upshift target marker at the optimal→redline boundary ("shift here"). -->
+    <color name="vu_target_marker">#FFC400</color>
 
     <!-- VU meter ambient warning wash -->
     <color name="vu_ambient_lug_base">#0022FF</color>
