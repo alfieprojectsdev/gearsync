@@ -27,7 +27,7 @@ Toolchain: AGP 8.3.0, Kotlin 1.9.23, Gradle 8.14.1, JVM target 17, `compileSdk 3
 app/src/main/cpp/          native C++ core
   native-lib.cpp           Oboe INPUT stream, FFT, sensor thread, shift logic, all JNI bindings
   DspPrimitives.h          shared owned radix-2 FFT primitive (ADR 001, no heavy deps)
-  AccelVibrationDsp.h      ADR 004 accel resampling + vibration FFT estimate helper
+  AccelVibrationDsp.h      ADR 004 accel resampling + vibration FFT estimate + M5 autocorrelation harmonic guard
   FusionPolicy.h           ADR 004 M4 pure mic-primary fusion policy (host-testable)
   CalibrationEngine.{h,cpp} Welford online algo + seeded 1-D K-Means++ (k=5) + classifyGear tolerance gate
   test/                    host-only C++ tests for RANSAC and accel vibration DSP
@@ -61,7 +61,7 @@ No tachometer feed; everything inferred from mic + GPS. See README "Shift Decisi
 
 ## Concurrency (C++)
 
-Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT of the audio callback — handoff via lock-free SPSC (`g_dspWriteSeq`/`g_dspReadSeq` atomic, release/acquire). PCM ring write wait-free (single producer). Audio callback wait-free (no locks, no alloc). ADR 004 accel samples use a separate SPSC ring (`g_accelRingWriteSeq`/`g_accelRingReadSeq`) with sensor thread as producer and DSP worker as consumer; M3 resamples a worker-local 256-sample window and computes diagnostic `f_vib`/prominence there. M4 runs the mic-primary fusion policy (`FusionPolicy.h::selectFusedHz`) on the same DSP thread: mic stays primary, vibration only refines (prominence-weighted blend on agreement) or, when mic is weak and vibration clearly stronger, replaces. The selected `f` feeds `ratio = f/speed` into the unchanged Welford/classifyGear/needle path. The PCM-frame fusion decision is authoritative for `g_vibrationSourceMode`/`g_vibrationFusionActive`; `updateVibrationFusionDiagnostics` only sets the disabled-reason while the gate is open.
+Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT of the audio callback — handoff via lock-free SPSC (`g_dspWriteSeq`/`g_dspReadSeq` atomic, release/acquire). PCM ring write wait-free (single producer). Audio callback wait-free (no locks, no alloc). ADR 004 accel samples use a separate SPSC ring (`g_accelRingWriteSeq`/`g_accelRingReadSeq`) with sensor thread as producer and DSP worker as consumer; M3 resamples a worker-local 256-sample window and computes diagnostic `f_vib`/prominence there. M5 adds an owned autocorrelation harmonic guard inside `estimateAccelVibrationHz`: if the FFT peak is ~2×/3× a strong ACF fundamental, `f_vib` is corrected down to the fundamental before fusion (defends against chassis-resonant harmonic latching, DL-008). M4 runs the mic-primary fusion policy (`FusionPolicy.h::selectFusedHz`) on the same DSP thread: mic stays primary, vibration only refines (prominence-weighted blend on agreement) or, when mic is weak and vibration clearly stronger, replaces. The selected `f` feeds `ratio = f/speed` into the unchanged Welford/classifyGear/needle path. The PCM-frame fusion decision is authoritative for `g_vibrationSourceMode`/`g_vibrationFusionActive`; `updateVibrationFusionDiagnostics` only sets the disabled-reason while the gate is open.
 
 ## JNI interface
 
