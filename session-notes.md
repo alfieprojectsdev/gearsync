@@ -314,3 +314,13 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
   - Stronger redline pulse (`PULSE_MAX_ALPHA` 128→150); cleaner neutral label `N/??` → `—`.
 - Verified visually via the **sweep build** (`./gradlew assembleSweep` → repo-root `gearsync-sweep-ui.apk`) — animates the meter with synthetic data on-desk, no car. Build SUCCESSFUL.
 - No device render verification beyond sweep; on-road look confirmed during ADR 004 M6 drive.
+
+---
+
+## Session 2026-06-15 — ADR 006 audio shift cues (design + plan + spike, Claude)
+
+- User request (POI "God Mode" inspiration): non-verbal eyes-free audio cue, pitch-direction = action-direction, that won't interfere with the mic. This **reverses the v2 "no audio output" tenet**, so it's documented as ADR 006 (Proposed) rather than coded blind.
+- **ADR 006** added to `adr.md`: optional `useAudioCues` (default off). Splits the v1 mic-interference failure into two fixable problems — (A) resource contention → use a **Shared/normal-latency** output (not the Exclusive low-latency path the mic owns); (B) acoustic self-pickup → place cues at **1.5–3 kHz**, far above the 20–250 Hz engine FFT band, so `findDominantHz` ignores them by construction. Cue language: ascending = upshift, descending = downshift, silence in the optimal zone; fire once per zone transition + cooldown.
+- **Plan** `plans/audio-cue-implementation-plan.md`: M0 on-device interference probe (HARD GATE) → M1 config flag + zone-transition trigger state machine → M2 Shared-output tone player → M3 tuning/escalation/optional A2DP → M4 docs/tenet reconciliation.
+- **Throwaway spike** (device-free, proves the central mic-safety claim): `app/src/main/cpp/ToneCue.h` (pure chirp synth, Hann envelope; up=1500→2200, down=2200→1500 — same band, distinguished by direction) + `test/spike_tone_cue_host.cpp` (synth → project FFT → assert peak in 1.5–3 kHz, <0.1% energy in 20–250 Hz). Verified: both cues peak ~1852 Hz, **0.0000% engine-band energy**. Resource-contention / real-pickup / xruns remain the device gate (M0).
+- ADR 006 is lower priority than ADR 004 M6 (the drive) and ADR 005 (OBD oracle); all optional/opt-in. Visual-only stays the default.
