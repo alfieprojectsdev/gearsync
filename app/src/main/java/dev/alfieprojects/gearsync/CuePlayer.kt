@@ -95,7 +95,9 @@ class CuePlayer(private val sampleRate: Int = SAMPLE_RATE) {
 
     companion object {
         private const val SAMPLE_RATE = 44100
-        private const val DURATION_SEC = 0.12f
+        // 300 ms: long enough to perceive the pitch *direction* (a 120 ms chirp
+        // reads as an undirected blip). Still out-of-band, so mic-safe regardless.
+        private const val DURATION_SEC = 0.30f
         private const val AMPLITUDE = 0.6
         // Both in the 1.5–2.2 kHz out-of-band window; distinguished by direction.
         private const val UP_START_HZ = 1500f
