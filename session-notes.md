@@ -363,3 +363,13 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - **Wiring:** `useAudioCues` (default false) → `VehicleConfig` → `ShiftAssistantService.applyVehicleConfig` sets Kotlin-only `NativeEngine.audioCuesEnabled` (no JNI — audio is pure Kotlin, parity stays 12↔12). `VUMeterView` frame loop calls `maybePlayAudioCue()` off the needle/gear it already reads; lazily creates the `CuePlayer` when enabled, releases it on detach / when disabled. No change to the native realtime DSP paths.
 - Cues also fire in demo mode (synthetic frames flow through the same needle/gear) — handy for demonstrating.
 - Verified `./gradlew assembleDebug` **BUILD SUCCESSFUL**. No kotlinc available for a JVM `CueState` unit test; logic kept pure + simple. **Mic-contamination / xrun guarantees remain the ADR 006 M0 device gate** — must confirm on the drive before flipping `useAudioCues` on by default. Tenet in CLAUDE.md reconciled to "visual-only by default; opt-in out-of-band audio".
+
+---
+
+## Session 2026-06-15 — quality review fixes: Kotlin test harness + CuePlayer crash guard
+
+- Triggered by the cue-cooldown overflow (which shipped through 2 PRs because the Kotlin side had no tests). Quality review of the session's audio surface; acted on the two highest-value findings.
+- **JVM test harness (closes the root gap):** added `testImplementation junit:4.13.2` + `app/src/test/.../CueStateTest.kt` (7 tests: first-upshift/no-overflow regression, downshift-on-lug, cooldown suppression, optimal-silence, unknown-gear, unchanged-zone, reset). `./gradlew testDebugUnitTest` → **7/7 pass, 0 failures**. First Kotlin-side automated tests in the repo (C++ already had host tests).
+- **CuePlayer crash guard:** `VUMeterView.maybePlayAudioCue` now try/catches CuePlayer construction + `play()` and latches a `cuesFailed` flag on any AudioTrack exception, so a failed opt-in extra can't repeatedly crash the 60 FPS render loop. Logs once.
+- Deferred (low priority): `NmeaSpeed.h` atof locale-sensitivity — it's ADR-007-rejected dead code; left as reference, flagged for deletion/strtof later.
+- Verified `testDebugUnitTest` 7/7 + `assembleDebug` BUILD SUCCESSFUL.
