@@ -51,15 +51,22 @@ object NativeEngine {
     @JvmStatic external fun nativeVibrationFusionStats(): FloatArray?
 
     /**
-     * VU state consumed by VUMeterView at 60 FPS. Normally proxies the native
-     * engine; in the `sweep` build type (BuildConfig.VU_SWEEP) it returns a
-     * synthetic ramp from [DebugSweep] so a built APK self-demos the meter with
-     * no mic / GPS / sensors. The flag is false in debug and release builds, so
-     * production behavior is unchanged. (see app/build.gradle `sweep` build type)
+     * Runtime demo toggle (triple-tap the upper-right corner of the VU meter).
+     * When on, feeds synthetic [DebugSweep] frames so the meter animates with no
+     * mic / GPS / sensors / running service — in ANY build. Independent of the
+     * compile-time `sweep` build type; off by default, so production is unchanged.
+     */
+    @Volatile @JvmStatic var demoMode: Boolean = false
+
+    /**
+     * VU state consumed by VUMeterView at 60 FPS. Returns synthetic [DebugSweep]
+     * frames when the `sweep` build type is active (BuildConfig.VU_SWEEP) OR the
+     * runtime [demoMode] is on; otherwise proxies the native engine. Both flags
+     * default off, so normal production behavior is unchanged.
      */
     @JvmStatic
     fun getVUMeterState(): FloatArray? =
-        if (BuildConfig.VU_SWEEP) DebugSweep.nextFrame() else nativeVUMeterState()
+        if (BuildConfig.VU_SWEEP || demoMode) DebugSweep.nextFrame() else nativeVUMeterState()
 
     /**
      * Restore Welford + gear-ratio state from a previous session.

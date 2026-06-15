@@ -6,6 +6,8 @@
     <string name="service_started">GearSync started</string>
     <string name="service_stopped">GearSync stopped</string>
     <string name="permissions_required">Permissions required: %1$s</string>
+    <string name="demo_on">Demo mode on</string>
+    <string name="demo_off">Demo mode off</string>
 
     <!-- Guided calibration strings. calib_capturing uses %1$d = 1-based gear number. -->
     <string name="btn_calibrate">Calibrate</string>
