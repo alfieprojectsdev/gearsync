@@ -4,7 +4,7 @@ Native Android app for manual-transmission drivers. Analyzes engine acoustics + 
 
 DSP + edge-ML run in native C++ (NDK) to avoid JVM GC jitter. Kotlin handles lifecycle, UI, GPS, persistence, config loading.
 
-> **v2 (visual-only):** Procedural audio cue output is removed. Earlier builds synthesized a blip via a second Oboe output stream that competed with the mic-capture DSP path for the low-latency audio resource. Now there is **no audio output** — the mic path owns the audio resource exclusively; the VU meter conveys gear / shift zone / shift events.
+> **v2 (visual-only by default):** The VU meter is the canonical channel. The v1 procedural blip was removed because it used a second *Exclusive/low-latency* Oboe output that competed with the mic-capture DSP for the fast-mixer resource. **ADR 006 (opt-in, `useAudioCues`, default off)** reintroduces audio safely: out-of-band chirps (1.5–2.2 kHz, above the 20–250 Hz engine FFT band) on a **Shared/normal-latency** AudioTrack that never claims the mic's exclusive resource. Default builds remain audio-free; the mic path still owns the low-latency audio resource exclusively.
 
 ## Build
 
@@ -36,7 +36,9 @@ app/src/main/java/dev/alfieprojects/gearsync/
   NativeEngine.kt          JNI bridge object (System.loadLibrary("native-lib"))
   VehicleConfig.kt         loads assets/vehicle_config.json, computes theoretical k_g seeds
   ShiftAssistantService.kt Foreground Service + GPS + SharedPreferences persistence
-  VUMeterView.kt           60 FPS Choreographer-driven Canvas VU meter
+  VUMeterView.kt           60 FPS Choreographer-driven Canvas VU meter; drives ADR 006 cues
+  CueState.kt              ADR 006 M1 pure zone-transition → cue-intent state machine
+  CuePlayer.kt             ADR 006 M2 Shared/normal-latency AudioTrack out-of-band chirp player
   MainActivity.kt          permission gating + service control
 app/src/main/assets/vehicle_config.json   per-vehicle profile (ships tuned for Toyota Wigo 1.0 E M/T)
 docs (root):               README.md adr.md specs.md prompt.md references.md session-notes.md
