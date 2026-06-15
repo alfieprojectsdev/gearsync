@@ -242,6 +242,22 @@ The shift-decision approach is deliberately lightweight (mic + GPS only, no OBD-
 
 ---
 
+## Contributing
+
+Contributions are welcome — the permissive MIT license below is meant to let anyone
+fork, improve, and ship changes. Workflow: branch off `main`, keep the opt-in defaults
+off (`useVibrationFusion`, `useAudioCues`), run the host tests before opening a PR
+(`./gradlew testDebugUnitTest` for Kotlin, the C++ `test/*_host.cpp` for DSP), and open
+a PR. Architecture decisions are recorded in `adr.md`; milestone plans live in `plans/`.
+
 ## License
 
-This project is licensed under the MIT License - see the `LICENSE` file for details.
+This project is licensed under the **MIT License** — see the [`LICENSE`](LICENSE) file
+for the full text.
+
+### Third-party components
+
+* **Google Oboe** (audio I/O) — Apache License 2.0; consumed as a prefab AAR, MIT-compatible.
+* **phyphox** — referenced as *prior-art inspiration only* for the vibration-DSP approach
+  (ADR 004). phyphox is GPLv3; **no phyphox code, tables, or implementation structure are
+  copied** into this project, so its copyleft does not extend here.
