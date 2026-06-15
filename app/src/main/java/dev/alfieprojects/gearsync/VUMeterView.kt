@@ -118,7 +118,11 @@ class VUMeterView @JvmOverloads constructor(
     private var cuePlayer: CuePlayer? = null
 
     private fun maybePlayAudioCue() {
-        if (!NativeEngine.audioCuesEnabled) {
+        // Real use: cues require the config flag (set by the service on Start).
+        // Demo mode runs without the service (triple-tap, no applyVehicleConfig),
+        // so also enable cues there so the desk demo actually plays them.
+        val cuesActive = NativeEngine.audioCuesEnabled || NativeEngine.demoMode
+        if (!cuesActive) {
             cuePlayer?.release()
             cuePlayer = null
             cueState.reset()
