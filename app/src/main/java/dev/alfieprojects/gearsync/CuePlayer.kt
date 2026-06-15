@@ -3,6 +3,7 @@ package dev.alfieprojects.gearsync
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.util.Log
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -38,6 +39,12 @@ class CuePlayer(private val sampleRate: Int = SAMPLE_RATE) {
         track.stop()
         track.reloadStaticData()
         track.play()
+        // Diagnostic: confirms the cue actually fired (filter `adb logcat -s ShiftAssistant`).
+        // If this logs but no sound is heard, the issue is device audio routing/volume,
+        // not the cue logic. Debug builds only.
+        if (BuildConfig.DEBUG) {
+            Log.i("ShiftAssistant", "cue play=$intent state=${track.playState} headPos=${track.playbackHeadPosition}")
+        }
     }
 
     fun release() {

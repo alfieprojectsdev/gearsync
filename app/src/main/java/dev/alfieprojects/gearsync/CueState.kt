@@ -44,8 +44,10 @@ class CueState(private val cooldownMs: Long = DEFAULT_COOLDOWN_MS) {
         }
         if (intent == CueIntent.NONE) return CueIntent.NONE
 
-        // Debounce: one cue per cooldown window.
-        if (nowMs - lastCueMs < cooldownMs) return CueIntent.NONE
+        // Debounce: one cue per cooldown window. Guard the never-fired sentinel
+        // explicitly — `nowMs - Long.MIN_VALUE` overflows and would wrap negative,
+        // permanently suppressing the first (and thus every) cue.
+        if (lastCueMs != Long.MIN_VALUE && nowMs - lastCueMs < cooldownMs) return CueIntent.NONE
         lastCueMs = nowMs
         return intent
     }
