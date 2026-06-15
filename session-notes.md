@@ -324,3 +324,11 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - **Plan** `plans/audio-cue-implementation-plan.md`: M0 on-device interference probe (HARD GATE) → M1 config flag + zone-transition trigger state machine → M2 Shared-output tone player → M3 tuning/escalation/optional A2DP → M4 docs/tenet reconciliation.
 - **Throwaway spike** (device-free, proves the central mic-safety claim): `app/src/main/cpp/ToneCue.h` (pure chirp synth, Hann envelope; up=1500→2200, down=2200→1500 — same band, distinguished by direction) + `test/spike_tone_cue_host.cpp` (synth → project FFT → assert peak in 1.5–3 kHz, <0.1% energy in 20–250 Hz). Verified: both cues peak ~1852 Hz, **0.0000% engine-band energy**. Resource-contention / real-pickup / xruns remain the device gate (M0).
 - ADR 006 is lower priority than ADR 004 M6 (the drive) and ADR 005 (OBD oracle); all optional/opt-in. Visual-only stays the default.
+
+---
+
+## Session 2026-06-15 — Runtime demo mode (triple-tap, Claude)
+
+- Replaces the separate-APK `sweep` build type with an in-app, any-build demo toggle. `NativeEngine.demoMode` (`@Volatile @JvmStatic`, default off); `getVUMeterState()` now returns synthetic `DebugSweep` frames when `BuildConfig.VU_SWEEP` **OR** `demoMode`. Production default unchanged.
+- `VUMeterView.onTouchEvent`: **triple-tap the upper-right corner** (x > 0.75·w, y < 0.25·h; ≤600 ms between taps) toggles `demoMode` + Toast. Synthetic frames need no mic/GPS/sensors/service, so the meter animates immediately on the main screen — desk demo without a car.
+- All builds (per request), not debug-gated. `sweep` build type kept for automated/screenshot builds. New strings `demo_on`/`demo_off`. Files: `NativeEngine.kt`, `VUMeterView.kt` (Claude-owned), `strings.xml`. `./gradlew assembleDebug` BUILD SUCCESSFUL.
