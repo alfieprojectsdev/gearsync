@@ -4,7 +4,7 @@ Native Android app for manual-transmission drivers. Analyzes engine acoustics + 
 
 DSP + edge-ML run in native C++ (NDK) to avoid JVM GC jitter. Kotlin handles lifecycle, UI, GPS, persistence, config loading.
 
-> **v2 (visual-only by default):** The VU meter is the canonical channel. The v1 procedural blip was removed because it used a second *Exclusive/low-latency* Oboe output that competed with the mic-capture DSP for the fast-mixer resource. **ADR 006 (opt-in, `useAudioCues`, default off)** reintroduces audio safely: out-of-band chirps (1.5–2.2 kHz, above the 20–250 Hz engine FFT band) on a **Shared/normal-latency** AudioTrack that never claims the mic's exclusive resource. Default builds remain audio-free; the mic path still owns the low-latency audio resource exclusively.
+> **v2 (visual-only by default):** The VU meter is the canonical channel. The v1 procedural blip was removed because it used a second *Exclusive/low-latency* Oboe output that competed with the mic-capture DSP for the fast-mixer resource. **ADR 006 (opt-in, `useAudioCues`, default off)** reintroduces audio safely: out-of-band chirps (1.5–2.9 kHz sweep, above the 20–250 Hz engine FFT band) on a **Shared/normal-latency** AudioTrack (`USAGE_MEDIA`/STREAM_MUSIC, so the volume rocker controls them) that never claims the mic's exclusive resource. Default builds remain audio-free; the mic path still owns the low-latency audio resource exclusively.
 
 ## Build
 

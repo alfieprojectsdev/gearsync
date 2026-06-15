@@ -73,9 +73,11 @@ class CuePlayer(private val sampleRate: Int = SAMPLE_RATE) {
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    // Sonification routes through the normal mixer (Shared), not the
-                    // low-latency exclusive fast path the mic stream uses.
-                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                    // USAGE_MEDIA → STREAM_MUSIC so the hardware volume rocker controls
+                    // cue level (USAGE_ASSISTANCE_SONIFICATION routes to the system
+                    // stream, which the rocker doesn't touch). Still the normal Shared
+                    // mixer — never the low-latency exclusive path the mic owns.
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build()
             )
@@ -99,10 +101,11 @@ class CuePlayer(private val sampleRate: Int = SAMPLE_RATE) {
         // reads as an undirected blip). Still out-of-band, so mic-safe regardless.
         private const val DURATION_SEC = 0.30f
         private const val AMPLITUDE = 0.6
-        // Both in the 1.5–2.2 kHz out-of-band window; distinguished by direction.
+        // Wide 1.5→2.9 kHz sweep (~1.4 kHz span) so the rise/fall is unmistakable;
+        // both endpoints stay in the out-of-band window above the 20–250 Hz engine band.
         private const val UP_START_HZ = 1500f
-        private const val UP_END_HZ = 2200f
-        private const val DOWN_START_HZ = 2200f
+        private const val UP_END_HZ = 2900f
+        private const val DOWN_START_HZ = 2900f
         private const val DOWN_END_HZ = 1500f
     }
 }
