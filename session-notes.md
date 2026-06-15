@@ -300,3 +300,17 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - Added `docs/TEST-DRIVE.md`: install, mount, permissions, drive procedure, the two logcat lines that matter, and pass criteria (probe ≥300 Hz, vibHz tracks micHz, no 2×/3× ghost, steadier needle under window/radio noise).
 - Verified `./gradlew assembleDebug` BUILD SUCCESSFUL (test APK 9.89 MB). M5 PR stays pure (harmonic guard only); diagnostics are this separate stacked branch.
 - **Remaining = the physical drive (M6).** Nothing more is buildable remotely: the app is complete and the test APK is ready. ADR 005 OBD oracle stays an optional accessory (plan pushed, not required to drive).
+
+---
+
+## Session 2026-06-14 — VU meter UI polish (Claude, ownership transferred)
+
+- VU-meter UI ownership transferred from codex (suspended) to Claude this session. Branch `feat/vumeter-ui-polish` off `main`.
+- Impeccable-aligned, glanceability-first changes to `VUMeterView.kt` + `colors.xml` (mechanics/state contract/60 FPS loop untouched, alloc-free onDraw preserved via reused `RectF`):
+  - **Tinted inactive segment** `#2A2A2A` → `#171B2E` (blue-charcoal, cohesive with the dial bg; no flat gray).
+  - **Rounded segments** (`drawRoundRect`, corner = 0.22 × min dim).
+  - **Needle-edge highlight**: bright near-white cap (`vu_needle_edge`) at the fill boundary — the "needle tip" the eye tracks in peripheral vision.
+  - **Upshift target marker**: static amber tick (`vu_target_marker` `#FFC400`) at the optimal→redline boundary = "shift here".
+  - Stronger redline pulse (`PULSE_MAX_ALPHA` 128→150); cleaner neutral label `N/??` → `—`.
+- Verified visually via the **sweep build** (`./gradlew assembleSweep` → repo-root `gearsync-sweep-ui.apk`) — animates the meter with synthetic data on-desk, no car. Build SUCCESSFUL.
+- No device render verification beyond sweep; on-road look confirmed during ADR 004 M6 drive.
