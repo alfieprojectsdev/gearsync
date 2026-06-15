@@ -332,3 +332,14 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - Replaces the separate-APK `sweep` build type with an in-app, any-build demo toggle. `NativeEngine.demoMode` (`@Volatile @JvmStatic`, default off); `getVUMeterState()` now returns synthetic `DebugSweep` frames when `BuildConfig.VU_SWEEP` **OR** `demoMode`. Production default unchanged.
 - `VUMeterView.onTouchEvent`: **triple-tap the upper-right corner** (x > 0.75·w, y < 0.25·h; ≤600 ms between taps) toggles `demoMode` + Toast. Synthetic frames need no mic/GPS/sensors/service, so the meter animates immediately on the main screen — desk demo without a car.
 - All builds (per request), not debug-gated. `sweep` build type kept for automated/screenshot builds. New strings `demo_on`/`demo_off`. Files: `NativeEngine.kt`, `VUMeterView.kt` (Claude-owned), `strings.xml`. `./gradlew assembleDebug` BUILD SUCCESSFUL.
+
+---
+
+## Session 2026-06-15 — ADR 007 low-latency GPS via NMEA (design + plan + spike, Claude)
+
+- User handover doc proposed raw-NMEA Doppler speed to fix the 1 Hz / Kalman-fused velocity lag that smears `r = f/v` during acceleration (real problem — the ADR-002 quality gate currently *discards* transient data to cope). Evaluated, kept the concept, corrected the doc's errors → ADR 007 (Proposed).
+- **Corrections vs the doc:** wrong lib name (`gearsync_dsp` → it's `native-lib`); `onNmeaMessage` timestamp is **epoch-ms fix time, not monotonic nanos** (capture `SystemClock.elapsedRealtimeNanos()` in-callback instead); **parse field 7 in Kotlin**, pass `injectGpsSpeed(float mps, long elapsedNs)` rather than marshalling a raw `String` into C++; "2–5 Hz" delivery is **chipset-dependent, unproven** → M0 rate probe gate.
+- **ADR 007** in `adr.md`: optional `useNmeaSpeed` (default off), fused path stays fallback. `$GxRMC` field 7 (knots ×0.514444), status `'A'`; native time-aligned `(f, tNs)` ring pairs the historical `f` with the Doppler `v`. New JNI method keeps the 12↔12 invariant.
+- **Plan** `plans/nmea-speed-implementation-plan.md`: M0 NMEA-rate probe (HARD GATE — stop if device is 1 Hz) → M1 pure parser → M2 Kotlin listener + JNI sink → M3 native time-aligned pairing → M4 validation/docs.
+- **Throwaway spike** (device-free): `app/src/main/cpp/NmeaSpeed.h` (pure `parseRmcSpeedMps`) + `test/spike_nmea_parser_host.cpp` — 5/5 pass (valid GPRMC=11.5235 m/s, GNRMC, void-status reject, empty-speed reject, non-RMC reject). The multi-Hz delivery win remains device-gated (M0).
+- Opt-in, default-off; lower priority than ADR 004 M6. The M0 probe rides the same on-car session as the drive; ADR 005 OBD true-RPM would quantify the false-transition reduction.
