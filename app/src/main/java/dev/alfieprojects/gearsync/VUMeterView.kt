@@ -116,8 +116,12 @@ class VUMeterView @JvmOverloads constructor(
 
     private val cueState = CueState()
     private var cuePlayer: CuePlayer? = null
+    // Latches if CuePlayer construction/playback throws on this device, so a failed
+    // opt-in extra can never repeatedly crash the 60 FPS render loop.
+    private var cuesFailed = false
 
     private fun maybePlayAudioCue() {
+        if (cuesFailed) return
         // Real use: cues require the config flag (set by the service on Start).
         // Demo mode runs without the service (triple-tap, no applyVehicleConfig),
         // so also enable cues there so the desk demo actually plays them.
@@ -128,9 +132,18 @@ class VUMeterView @JvmOverloads constructor(
             cueState.reset()
             return
         }
-        val player = cuePlayer ?: CuePlayer().also { cuePlayer = it }
-        val intent = cueState.update(needlePos, gear > 0, System.currentTimeMillis())
-        if (intent != CueIntent.NONE) player.play(intent)
+        // CuePlayer touches AudioTrack, which can throw on odd devices/formats.
+        // Cues are an opt-in extra — never let them take down the meter.
+        try {
+            val player = cuePlayer ?: CuePlayer().also { cuePlayer = it }
+            val intent = cueState.update(needlePos, gear > 0, System.currentTimeMillis())
+            if (intent != CueIntent.NONE) player.play(intent)
+        } catch (e: Exception) {
+            cuesFailed = true
+            cuePlayer?.release()
+            cuePlayer = null
+            android.util.Log.e("ShiftAssistant", "audio cues disabled (player error): ${e.message}")
+        }
     }
 
     override fun onAttachedToWindow() {

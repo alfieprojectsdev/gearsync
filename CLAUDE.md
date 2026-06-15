@@ -40,6 +40,7 @@ app/src/main/java/dev/alfieprojects/gearsync/
   CueState.kt              ADR 006 M1 pure zone-transition → cue-intent state machine
   CuePlayer.kt             ADR 006 M2 Shared/normal-latency AudioTrack out-of-band chirp player
   MainActivity.kt          permission gating + service control
+app/src/test/java/…/       JVM unit tests for pure Kotlin logic (CueStateTest) — `./gradlew testDebugUnitTest`
 app/src/main/assets/vehicle_config.json   per-vehicle profile (ships tuned for Toyota Wigo 1.0 E M/T)
 docs (root):               README.md adr.md specs.md prompt.md references.md session-notes.md
 ```
