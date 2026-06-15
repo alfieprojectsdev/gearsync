@@ -116,6 +116,9 @@ class ShiftAssistantService : Service() {
                 speedJitterThresholdMps  = cfg.speedJitterThresholdMps,
                 useVibrationFusion       = cfg.useVibrationFusion
             )
+            // ADR 006 audio cues are Kotlin-only (no JNI); expose the opt-in flag
+            // for VUMeterView to read. Default off → visual-only.
+            NativeEngine.audioCuesEnabled = cfg.useAudioCues
         } catch (e: Exception) {
             // Config load failure is non-fatal; engine continues unconfigured (open tolerances).
             android.util.Log.e("ShiftAssistant", "vehicle_config.json load failed: ${e.message}")

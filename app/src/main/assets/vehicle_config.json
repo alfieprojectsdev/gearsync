@@ -31,6 +31,9 @@
     "speedJitterThresholdMps": 0.5,
 
     "_comment_vibration": "ADR 004 opt-in. Defaults off: the microphone path remains primary and vibration fusion is additive/rate-gated.",
-    "useVibrationFusion": false
+    "useVibrationFusion": false,
+
+    "_comment_audio_cues": "ADR 006 opt-in. Defaults off: visual-only is the default. When on, out-of-band (1.5-2.2 kHz) chirps cue shift direction (ascending=upshift, descending=downshift), placed above the 20-250 Hz engine band so the mic ignores them.",
+    "useAudioCues": false
   }
 }

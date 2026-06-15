@@ -352,3 +352,14 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - A07/A56 do expose Android **Raw GNSS Measurements** (carrier phase / pseudorange / Doppler) and A56 has dual-frequency L1+L5 — but all still at **1 Hz** (better position accuracy, not rate).
 - **Salvage (DL-NMEA-1, rate-independent):** the two original flaws were conflated. Flaw 1 (1 Hz) unfixable. Flaw 2 (Kalman smoothing/lag of `Location.getSpeed()`) is separable and still real at 1 Hz — the **M3 time-alignment** (pair each `v` with the historical `f` from its actual fix instant via a monotonic `(f, tNs)` ring) reduces the `r=f/v` accel smear even at 1 Hz, and `GnssMeasurementsEvent` Doppler could give a fresher value than fused `getSpeed()`. Worth a future ADR 008 if pursued; ADR 005 OBD true-RPM remains the better ground-truth lever.
 - Recorded the verdict in `adr.md` (ADR 007 status → rate-path REJECTED + DL-NMEA-1). Kept the `NmeaSpeed.h` parser spike as harmless reference. No app code was built against the rate path — gate caught it first (exactly the point of the M0-gate discipline).
+
+---
+
+## Session 2026-06-15 — ADR 006 audio cues IMPLEMENTED (M1+M2, Claude)
+
+- Implemented the device-free milestones of ADR 006. M0 (on-device mic-interference probe) + M3 (tuning/A2DP) stay device-gated — validate on the drive.
+- **M1 — `CueState.kt`** (pure, no Android, unit-testable): needle→zone (LUG<0.33<OPT<0.66<REDLINE, mirrors VUMeterView), emits a cue intent only on a zone *transition* with a 1500 ms cooldown. Entering REDLINE→UPSHIFT, entering LUG→DOWNSHIFT, OPTIMAL→silence; no cue across unknown-gear boundaries.
+- **M2 — `CuePlayer.kt`**: Kotlin port of the ToneCue chirp synth (Hann-enveloped linear chirp, up 1500→2200 / down 2200→1500 Hz, 120 ms) played on a **Shared/normal-latency** `AudioTrack` (`USAGE_ASSISTANCE_SONIFICATION`, MODE_STATIC, replay via stop→reloadStaticData→play) — never the Exclusive low-latency path the mic owns (fix A); tones out of the 20–250 Hz engine band (fix B).
+- **Wiring:** `useAudioCues` (default false) → `VehicleConfig` → `ShiftAssistantService.applyVehicleConfig` sets Kotlin-only `NativeEngine.audioCuesEnabled` (no JNI — audio is pure Kotlin, parity stays 12↔12). `VUMeterView` frame loop calls `maybePlayAudioCue()` off the needle/gear it already reads; lazily creates the `CuePlayer` when enabled, releases it on detach / when disabled. No change to the native realtime DSP paths.
+- Cues also fire in demo mode (synthetic frames flow through the same needle/gear) — handy for demonstrating.
+- Verified `./gradlew assembleDebug` **BUILD SUCCESSFUL**. No kotlinc available for a JVM `CueState` unit test; logic kept pure + simple. **Mic-contamination / xrun guarantees remain the ADR 006 M0 device gate** — must confirm on the drive before flipping `useAudioCues` on by default. Tenet in CLAUDE.md reconciled to "visual-only by default; opt-in out-of-band audio".

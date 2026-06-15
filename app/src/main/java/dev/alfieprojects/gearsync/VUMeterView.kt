@@ -103,9 +103,30 @@ class VUMeterView @JvmOverloads constructor(
             if (shiftDetected) flashAlpha = 255f
             else flashAlpha = max(0f, flashAlpha - FLASH_DECAY)
 
+            maybePlayAudioCue()
+
             invalidate()
             if (isRunning) choreographer.postFrameCallback(this)
         }
+    }
+
+    // ─── ADR 006 audio cues (opt-in, off the realtime DSP path) ──────────────
+    // Lazily owns a CuePlayer only while cues are enabled; releases it on detach.
+    // Drives CueState off the same needle/gear this frame already read.
+
+    private val cueState = CueState()
+    private var cuePlayer: CuePlayer? = null
+
+    private fun maybePlayAudioCue() {
+        if (!NativeEngine.audioCuesEnabled) {
+            cuePlayer?.release()
+            cuePlayer = null
+            cueState.reset()
+            return
+        }
+        val player = cuePlayer ?: CuePlayer().also { cuePlayer = it }
+        val intent = cueState.update(needlePos, gear > 0, System.currentTimeMillis())
+        if (intent != CueIntent.NONE) player.play(intent)
     }
 
     override fun onAttachedToWindow() {
@@ -120,6 +141,8 @@ class VUMeterView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         isRunning = false
         choreographer.removeFrameCallback(frameCallback)
+        cuePlayer?.release()
+        cuePlayer = null
         super.onDetachedFromWindow()
     }
 

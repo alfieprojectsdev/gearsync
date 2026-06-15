@@ -59,6 +59,13 @@ object NativeEngine {
     @Volatile @JvmStatic var demoMode: Boolean = false
 
     /**
+     * ADR 006 audio-cue opt-in (Kotlin-side only — no native/JNI surface; cues are
+     * pure Kotlin AudioTrack). Set from `vehicle_config.json` `useAudioCues` in the
+     * service; read by VUMeterView to drive [CuePlayer]. Default off → silent.
+     */
+    @Volatile @JvmStatic var audioCuesEnabled: Boolean = false
+
+    /**
      * VU state consumed by VUMeterView at 60 FPS. Returns synthetic [DebugSweep]
      * frames when the `sweep` build type is active (BuildConfig.VU_SWEEP) OR the
      * runtime [demoMode] is on; otherwise proxies the native engine. Both flags
