@@ -14,8 +14,8 @@ package dev.alfieprojects.gearsync
  */
 object DebugSweep {
 
-    /** Seconds for one lug→redline ramp; gear advances at the end of each ramp. */
-    private const val SWEEP_SECONDS = 4.0
+    /** Seconds for one full triangle (lug→redline→lug); gear advances per cycle. */
+    private const val SWEEP_SECONDS = 6.0
 
     /** Needle fraction beyond which a shift event flashes (top of the redline). */
     private const val SHIFT_FLASH_FROM = 0.97
@@ -36,8 +36,11 @@ object DebugSweep {
         val cyclePos = (t % SWEEP_SECONDS) / SWEEP_SECONDS          // 0 → 1 within a gear
         val gear = ((t / SWEEP_SECONDS).toInt() % NUM_GEARS) + 1    // 1 → 5, repeating
 
-        val needle = cyclePos.toFloat()                            // lug → redline
-        val shift = if (cyclePos > SHIFT_FLASH_FROM) 1f else 0f
+        // Triangle: lug→redline over the first half, redline→lug over the second.
+        // A monotonic ramp+reset only ever crossed *up* (the reset down landed
+        // inside the cue cooldown), so the demo never played the downshift cue.
+        val needle = (if (cyclePos < 0.5) cyclePos * 2.0 else 2.0 - cyclePos * 2.0).toFloat()
+        val shift = if (needle > SHIFT_FLASH_FROM) 1f else 0f
         val hz = 30f + needle * 90f                                // cosmetic 30 → 120 Hz
         val speed = 5f + gear * 4f                                 // cosmetic m/s
         val confidence = 0.9f
