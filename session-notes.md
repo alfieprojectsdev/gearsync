@@ -343,3 +343,12 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - **Plan** `plans/nmea-speed-implementation-plan.md`: M0 NMEA-rate probe (HARD GATE — stop if device is 1 Hz) → M1 pure parser → M2 Kotlin listener + JNI sink → M3 native time-aligned pairing → M4 validation/docs.
 - **Throwaway spike** (device-free): `app/src/main/cpp/NmeaSpeed.h` (pure `parseRmcSpeedMps`) + `test/spike_nmea_parser_host.cpp` — 5/5 pass (valid GPRMC=11.5235 m/s, GNRMC, void-status reject, empty-speed reject, non-RMC reject). The multi-Hz delivery win remains device-gated (M0).
 - Opt-in, default-off; lower priority than ADR 004 M6. The M0 probe rides the same on-car session as the drive; ADR 005 OBD true-RPM would quantify the false-transition reduction.
+
+---
+
+## Session 2026-06-15 — ADR 007 M0 gate FAILED (research), rate path rejected
+
+- #21 (ADR 007 docs) merged; `main` @ `809994a`. Then the M0 gate was answered by **research instead of a device probe**, and it **failed**: both candidate phones — Samsung Galaxy **A07** (MediaTek) and **A56** (Exynos 1580) — cap NMEA + location output at **1 Hz** (Android consumer-GNSS thermal/battery limit, not app-fixable). The "2–5 Hz NMEA" premise is false on the target hardware → the higher-rate motivation for ADR 007 is **dead**; do not build the NMEA listener for rate.
+- A07/A56 do expose Android **Raw GNSS Measurements** (carrier phase / pseudorange / Doppler) and A56 has dual-frequency L1+L5 — but all still at **1 Hz** (better position accuracy, not rate).
+- **Salvage (DL-NMEA-1, rate-independent):** the two original flaws were conflated. Flaw 1 (1 Hz) unfixable. Flaw 2 (Kalman smoothing/lag of `Location.getSpeed()`) is separable and still real at 1 Hz — the **M3 time-alignment** (pair each `v` with the historical `f` from its actual fix instant via a monotonic `(f, tNs)` ring) reduces the `r=f/v` accel smear even at 1 Hz, and `GnssMeasurementsEvent` Doppler could give a fresher value than fused `getSpeed()`. Worth a future ADR 008 if pursued; ADR 005 OBD true-RPM remains the better ground-truth lever.
+- Recorded the verdict in `adr.md` (ADR 007 status → rate-path REJECTED + DL-NMEA-1). Kept the `NmeaSpeed.h` parser spike as harmless reference. No app code was built against the rate path — gate caught it first (exactly the point of the M0-gate discipline).
