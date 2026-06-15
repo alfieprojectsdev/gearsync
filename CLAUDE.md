@@ -4,7 +4,7 @@ Native Android app for manual-transmission drivers. Analyzes engine acoustics + 
 
 DSP + edge-ML run in native C++ (NDK) to avoid JVM GC jitter. Kotlin handles lifecycle, UI, GPS, persistence, config loading.
 
-> **v2 (visual-only by default):** The VU meter is the canonical channel. The v1 procedural blip was removed because it used a second *Exclusive/low-latency* Oboe output that competed with the mic-capture DSP for the fast-mixer resource. **ADR 006 (opt-in, `useAudioCues`, default off)** reintroduces audio safely: out-of-band chirps (1.5–2.2 kHz, above the 20–250 Hz engine FFT band) on a **Shared/normal-latency** AudioTrack that never claims the mic's exclusive resource. Default builds remain audio-free; the mic path still owns the low-latency audio resource exclusively.
+> **v2 (visual-only by default):** The VU meter is the canonical channel. The v1 procedural blip was removed because it used a second *Exclusive/low-latency* Oboe output that competed with the mic-capture DSP for the fast-mixer resource. **ADR 006 (opt-in, `useAudioCues`, default off)** reintroduces audio safely: out-of-band chirps (1.5–2.9 kHz sweep, above the 20–250 Hz engine FFT band) on a **Shared/normal-latency** AudioTrack (`USAGE_MEDIA`/STREAM_MUSIC, so the volume rocker controls them) that never claims the mic's exclusive resource. Default builds remain audio-free; the mic path still owns the low-latency audio resource exclusively.
 
 ## Build
 
@@ -92,7 +92,9 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 
 ## Open items (see session-notes.md / README Current Limitations)
 
-- Add `mipmap/` launcher icons (manifest references `@mipmap/ic_launcher` — must exist to build).
-- Guided per-gear calibration UI (RANSAC, ADR 002).
-- `onGearCalibrated(int)` C++→Kt callback to update UI on gear lock.
-- Test FFT peak detection on physical arm64 device.
+- **On-device validation (the one big gate, C-008):** ADR 004 M6 drive (probe ≥300 Hz, fusion vs mic-only, M5 harmonic guard on real chassis data) + ADR 006 M0 (audio cue doesn't contaminate the engine band / no xruns while the mic captures). Both need a physical arm64 device + the car. Use `gearsync-testdrive-fusion.apk` (fusion+cues on) + `adb logcat -s ShiftAssistant`.
+- Robust pitch detection on the **mic** path (HPS/YIN); the vibration path already has the M5 autocorrelation harmonic guard.
+- Rate-independent GPS time-alignment (ADR 007 salvage / possible ADR 008) — the NMEA rate path was rejected (A07/A56 cap NMEA at 1 Hz).
+- ADR 005 OBD-II oracle implementation (optional accessory, plan only) for calibration ground-truth.
+
+Done since earlier drafts (no longer open): launcher icons exist (adaptive `mipmap-anydpi-v26`); `onGearCalibrated` C++→Kt upcall is wired (`NativeEngine.calibrationListener`); guided per-gear RANSAC `CalibrationActivity` shipped.

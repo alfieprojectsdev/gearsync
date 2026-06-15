@@ -3,6 +3,7 @@ package dev.alfieprojects.gearsync
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Button
@@ -35,6 +36,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Route the hardware volume rocker to the media stream so it adjusts the
+        // ADR 006 audio cues (they play on STREAM_MUSIC) anytime the app is foreground.
+        volumeControlStream = AudioManager.STREAM_MUSIC
 
         findViewById<Button>(R.id.btnStart).setOnClickListener { checkAndStart() }
         findViewById<Button>(R.id.btnStop).setOnClickListener  { stopShiftService() }

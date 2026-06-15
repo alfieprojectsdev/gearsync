@@ -2,7 +2,7 @@
 
 GearSync is a high-performance, local-first native Android application designed to assist manual transmission drivers. By analyzing real-time acoustic signatures and chassis vibrations, GearSync dynamically identifies optimal shifting thresholds and provides low-latency **visual** feedback—completely independent of an OBD-II interface or cloud connectivity.
 
-> **Note (v2):** The procedural audio cue output has been deprecated. Earlier builds synthesized a high-frequency blip through a second Oboe output stream, which competed with the microphone-capture DSP pipeline for the low-latency audio path. The system is now **visual-only**: a hardware-accelerated VU meter conveys current gear, optimal-shift zone, and shift events without any audio output. See [Shift Decision Logic](#shift-decision-logic) and [Current Limitations](#current-limitations).
+> **Note (v2 — visual-only by default):** The hardware-accelerated VU meter is the canonical channel — it conveys current gear, optimal-shift zone, and shift events with no audio required. The v1 procedural blip was removed because it used a second *Exclusive/low-latency* Oboe output that competed with the microphone-capture DSP for the fast-mixer resource. **Audio is now reintroduced safely as an opt-in (ADR 006, `useAudioCues`, default off):** non-verbal out-of-band chirps (a 1.5–2.9 kHz sweep, far above the 20–250 Hz engine FFT band) on a **Shared/normal-latency** AudioTrack that never claims the mic's exclusive resource — ascending = upshift, descending = downshift. Default builds remain audio-free. See [Shift Decision Logic](#shift-decision-logic) and [Current Limitations](#current-limitations).
 
 The core digital signal processing (DSP) pipeline and machine learning calibration engines are implemented in native C++ via the Android NDK to bypass virtual machine overhead and ensure sub-millisecond execution.
 
@@ -10,11 +10,12 @@ The core digital signal processing (DSP) pipeline and machine learning calibrati
 
 ## Features
 
-* **Acoustic Tachometer with Opt-In Vibration Fusion:** Utilizes hardware microphone PCM data by default, with rate-gated raw-accelerometer vibration sensing scaffolded as an additive opt-in source for engine firing frequency.
-* **Glanceable Visual Interface:** A hardware-accelerated, custom VU meter UI that conveys current gear, the optimal-shift zone, calibration confidence, and shift events with zero audio distraction.
-* **Edge ML Automated Calibration:** Integrates 1-D K-Means clustering seeded from a configurable per-vehicle profile to adapt to any vehicle's gear ratios and mechanical signature.
-* **Configurable Vehicle Profile:** A JSON asset (`assets/vehicle_config.json`) defines transmission ratios, final drive, tire circumference, and tolerance bands — ships pre-tuned for the **Toyota Wigo 1.0 E M/T** but editable for any vehicle without recompiling.
-* **Fragmented Session Stitching:** Built-in state persistence utilizing Welford's Online Algorithm to allow drivers to complete calibration across multiple, non-contiguous driving sessions.
+* **Acoustic Tachometer with Opt-In Vibration Fusion:** Microphone PCM is the primary, default source. An opt-in (default-off) raw-accelerometer path adds a fully-implemented vibration estimate — timestamped SPSC ring → resampled FFT → autocorrelation harmonic guard (rejects aliased 2×/3× chassis harmonics) → mic-primary fusion policy that only refines or, when the mic is weak and vibration clearly stronger, replaces the acoustic estimate. Rate-gated; degrades to mic-only when the device can't sustain the sample rate.
+* **Glanceable Visual Interface:** A hardware-accelerated, custom VU meter UI conveying current gear, the optimal-shift zone, calibration confidence, and shift events — with a bright needle-edge and an amber upshift-target marker for peripheral readability. A hidden **demo mode** (triple-tap the upper-right corner) animates it with synthetic data, no car needed.
+* **Opt-In Audio Shift Cues (ADR 006):** Default-off non-verbal out-of-band chirps — ascending = upshift, descending = downshift — for eyes-on-road feedback without interfering with the mic.
+* **Edge ML Automated Calibration:** 1-D K-Means clustering seeded from a configurable per-vehicle profile, refined online; optional guided per-gear RANSAC capture for tighter centroids.
+* **Configurable Vehicle Profile:** A JSON asset (`assets/vehicle_config.json`) defines transmission ratios, final drive, tire circumference, tolerance bands, and the opt-in flags — ships pre-tuned for the **Toyota Wigo 1.0 E M/T**, editable for any vehicle without recompiling.
+* **Fragmented Session Stitching:** State persistence via Welford's Online Algorithm to complete calibration across multiple, non-contiguous driving sessions.
 
 ---
 
@@ -29,14 +30,15 @@ GearSync leverages a clear separation of concerns between high-level Android ope
 [JNI Bridge Surface]
        │
        ▼
-[Native C++ Core] ◄──── [Oboe Input Stream] (Raw Audio PCM, mic)
+[Native C++ Core] ◄──── [Oboe Input Stream] (Raw Audio PCM, mic — Exclusive low-latency)
        │          ◄──── [ASensorManager] (Raw Accelerometer, fastest gated rate)
-       ├─► [FFT / Spectral Analysis Layer]   (DSP worker thread)
+       ├─► [Mic FFT] + [Accel resample→FFT→harmonic guard] ─► [Mic-primary Fusion Policy]
        ├─► [Edge ML Calibration Engine]       (Welford + K-Means)
        └─► [Shift Decision Logic] ──► [VU Meter UI] (60 FPS Canvas)
+                                          └─► [Audio Cue Player] (opt-in, Shared/normal-latency)
 ```
 
-> The DSP runs on a dedicated worker thread fed by a **lock-free single-producer/single-consumer (SPSC) snapshot handoff** from the real-time audio input callback. The audio callback itself is wait-free (no locks, no allocation), and there is **no audio output stream** — the microphone path owns the low-latency audio resource exclusively.
+> The DSP runs on a dedicated worker thread fed by a **lock-free single-producer/single-consumer (SPSC) snapshot handoff** from the real-time audio input callback. The audio callback is wait-free (no locks, no allocation), and the **microphone input owns the low-latency (Exclusive) audio resource**. The optional ADR 006 audio cues play on a separate **Shared/normal-latency** output that never contends for that fast path; with cues off (default) there is no output stream at all.
 
 ### Module Responsibilities
 
@@ -111,7 +113,7 @@ In short: **lugging → downshift, optimal → hold, redline → upshift.** The 
 Two guards prevent the model from being poisoned by noisy data:
 
 1. **GPS stability window.** GPS updates at 1 Hz while the acoustic pipeline runs at ~12 Hz, so during acceleration/braking the two signals are temporally misaligned and `r` is meaningless. The engine only feeds a ratio into Welford/K-Means after GPS speed has been **stable** (Δ ≤ `speedJitterThresholdMps`, default 0.5 m/s) for `steadyStateWindowSeconds` consecutive samples (default **4 s** of steady-state cruising).
-2. **Welford confidence.** The running variance `σ² = M₂/(n−1)` is exposed as a confidence score `1/(1+σ²)`; the VU meter dims its zones until confidence rises, signalling that calibration is still converging.
+2. **Welford confidence.** The running variance `σ² = M₂/n` is exposed as a confidence score `1/(1+σ²)`; the VU meter dims its zones until confidence rises, signalling that calibration is still converging.
 
 ### Why a tolerance *band* instead of exact slopes
 
@@ -194,7 +196,7 @@ All vehicle-specific parameters live in `app/src/main/assets/vehicle_config.json
   "calibration":   {
     "ratioToleranceLow": 0.98, "ratioToleranceHigh": 1.025,
     "steadyStateWindowSeconds": 4, "speedJitterThresholdMps": 0.5,
-    "useVibrationFusion": false
+    "useVibrationFusion": false, "useAudioCues": false
   }
 }
 ```
@@ -208,6 +210,7 @@ All vehicle-specific parameters live in `app/src/main/assets/vehicle_config.json
 | `steadyStateWindowSeconds` | Seconds of stable cruising before a ratio is learned |
 | `speedJitterThresholdMps` | How much GPS speed may vary and still count as "stable" |
 | `useVibrationFusion` | ADR 004 opt-in flag. Defaults false; mic-only remains the primary/default path |
+| `useAudioCues` | ADR 006 opt-in flag. Defaults false; when true, out-of-band shift chirps play on the media stream |
 
 On startup `VehicleConfig.kt` loads this JSON, computes the `k_g` seeds, and pushes them plus `useVibrationFusion` to the native engine via `NativeEngine.setVehicleConfig(...)`. If the file is missing or malformed, the engine falls back to open tolerances and learns purely from K-Means. Even when vibration fusion is requested, native diagnostics keep it rate-gated and mic-primary.
 
@@ -218,8 +221,8 @@ On startup `VehicleConfig.kt` loads this JSON, computes the `k_g` seeds, and pus
 The shift-decision approach is deliberately lightweight (mic + GPS only, no OBD-II). That buys broad compatibility at the cost of several known constraints:
 
 * **GPS speed is the weakest link.** Consumer GPS updates at ~1 Hz with latency and accuracy that degrade in tunnels, urban canyons, and parking structures. Because the gear observable is `f / v`, any error in `v` propagates directly into the ratio. The 4-second steady-state lock mitigates but does not eliminate this.
-* **Temporal misalignment during transients.** Acoustic frames arrive ~12×/s but GPS only 1×/s. During hard acceleration or braking the two are out of sync, so ratios are only trusted during steady cruising — meaning the system effectively *cannot* recommend a shift in the middle of aggressive driving, which is exactly when shift timing matters most.
-* **Single-peak FFT is fragile.** `findDominantHz` takes the single loudest bin in the 20–250 Hz band. Road noise, exhaust resonance, HVAC fans, music, or a passenger talking can momentarily outweigh the true firing peak, producing a spurious ratio. There is currently no harmonic-product-spectrum or peak-tracking confirmation.
+* **Temporal misalignment during transients.** Acoustic frames arrive ~12×/s but GPS only 1×/s. During hard acceleration or braking the two are out of sync, so ratios are only trusted during steady cruising. A raw-NMEA Doppler-speed path was investigated to fix this (ADR 007) but **rejected** — the target phones (Galaxy A07/A56) cap NMEA at 1 Hz, so it offers no rate gain; a rate-independent time-alignment salvage is noted for future work.
+* **Single-peak FFT on the mic path.** `findDominantHz` takes the single loudest bin in the 20–250 Hz band, so road noise, exhaust resonance, HVAC, music, or talking can momentarily outweigh the true firing peak. The opt-in vibration path now has an autocorrelation harmonic guard (ADR 004 M5) against aliased 2×/3× harmonics, but the **mic path itself** still has no harmonic-product-spectrum or peak-tracking confirmation.
 * **No explicit shift-event detection in the model.** The accelerometer spike only drives a visual flash; it is *not* fed into the classifier to anticipate a gear change. Gear changes are inferred purely from the ratio jumping bands after the fact.
 * **Clutch / neutral states are invisible.** When the clutch is depressed (or in neutral), `f` and `v` decouple and the `f = k_g·v` model is invalid. The tolerance gate rejects these as "unknown," but the system does not affirmatively detect a disengaged clutch.
 * **Frequency resolution is coarse at idle.** A 4096-point FFT at 48 kHz yields ~11.7 Hz/bin. Near the 20 Hz low end, a one-bin error is a large fractional RPM error, so low-idle gears are the noisiest to classify.
@@ -228,8 +231,8 @@ The shift-decision approach is deliberately lightweight (mic + GPS only, no OBD-
 
 ## Areas for Improvement
 
-* **Sensor fusion for speed.** Blend GPS with wheel-speed-derived accelerometer integration (or device IMU dead-reckoning) to get a higher-rate, lower-latency `v` estimate and unlock shift recommendations during transients.
-* **Robust pitch detection.** Replace the single-bin peak with a Harmonic Product Spectrum or YIN-style estimator plus frame-to-frame peak tracking to reject transient noise and lock onto the true fundamental.
+* **Sensor fusion for speed.** Higher-rate NMEA Doppler speed was tried and rejected (ADR 007 — 1 Hz hardware cap on the target phones). The rate-independent lever still open: time-align each GPS `v` to the engine `f` from its actual fix instant (a monotonic `(f, tNs)` ring) to cut the transient smear even at 1 Hz.
+* **Robust pitch detection on the mic path.** The vibration path already has an autocorrelation harmonic guard (ADR 004 M5); extend a Harmonic Product Spectrum / YIN-style estimator + frame-to-frame peak tracking to the **mic** `findDominantHz` to reject transient noise and lock the true fundamental.
 * **Predictive shift timing.** Feed the accelerometer and the needle's velocity (dNeedle/dt) into a small state machine so the UI can recommend *"upshift now"* slightly ahead of redline rather than reporting it after the fact.
 * **Explicit clutch/neutral detection.** Use the sudden decoupling of `f` and `v` (frequency rises while speed holds, or vice-versa) to detect disengagement and freeze classification cleanly.
 * **Adaptive tolerance.** Let the accept band tighten automatically as Welford confidence grows, instead of using static `tolLow`/`tolHigh` for the whole vehicle lifecycle.
