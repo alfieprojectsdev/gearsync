@@ -3,6 +3,16 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Release signing — credentials live in a gitignored keystore.properties at the
+// repo root (never committed). When absent (contributors, CI), the release build
+// is simply unsigned; debug/sweep are unaffected. See scripts/generate-keystore.sh
+// and keystore.properties.template.
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystoreProps.load(new FileInputStream(keystorePropsFile))
+}
+
 android {
     namespace         'dev.alfieprojects.gearsync'
     compileSdk         34
@@ -50,6 +60,20 @@ android {
         jvmTarget = '17'
     }
 
+    signingConfigs {
+        // Populated only when keystore.properties exists. If it doesn't, the release
+        // build runs unsigned (signingConfig stays null) rather than failing — so the
+        // repo builds for anyone; only the keystore holder produces installable releases.
+        if (keystorePropsFile.exists()) {
+            release {
+                storeFile     rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias      keystoreProps['keyAlias']
+                keyPassword   keystoreProps['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // Production-equivalent VU path: proxy the native engine.
@@ -59,6 +83,10 @@ android {
             minifyEnabled   true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             buildConfigField 'boolean', 'VU_SWEEP', 'false'
+            // Sign with the release key when available; otherwise leave unsigned.
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
         }
         // `sweep`: throwaway visual-demo build. Ignores mic/GPS/sensors and feeds
         // VUMeterView a synthetic lug→redline ramp (DebugSweep) so the segmented

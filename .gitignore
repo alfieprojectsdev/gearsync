@@ -17,3 +17,8 @@ captures/
 # (reproducible from source, and APKs bloat git history / don't delta-compress).
 *.apk
 gearsync-testdrive-fusion.pdf
+
+# Release signing — NEVER commit the keystore or its credentials.
+keystore.properties
+*.jks
+*.keystore
