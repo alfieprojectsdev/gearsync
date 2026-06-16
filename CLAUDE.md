@@ -29,6 +29,7 @@ app/src/main/cpp/          native C++ core
   DspPrimitives.h          shared owned radix-2 FFT primitive (ADR 001, no heavy deps)
   AccelVibrationDsp.h      ADR 004 accel resampling + vibration FFT estimate + M5 autocorrelation harmonic guard
   FusionPolicy.h           ADR 004 M4 pure mic-primary fusion policy (host-testable)
+  GearHysteresis.h         ADR 008 pure gear-display hysteresis + accel transient gate (host-testable)
   CalibrationEngine.{h,cpp} Welford online algo + seeded 1-D K-Means++ (k=5) + classifyGear tolerance gate
   test/                    host-only C++ tests for RANSAC and accel vibration DSP
   CMakeLists.txt           links liblog, libandroid, oboe::oboe
@@ -55,12 +56,12 @@ No tachometer feed; everything inferred from mic + GPS. See README "Shift Decisi
 2. **Ratio observable:** clutch engaged → `f = k_g·v`. If `v ≥ MIN_SPEED_MPS` (1 m/s), compute `r = f/v`. `r` uniquely identifies the gear (constant within a gear, steps after a shift).
 3. **Seeded gears:** theoretical `k_g = (ratio_g · finalDrive · firingFactor) / tireCircumference`, `firingFactor = cylinders / (strokeCycle/2)`. Loaded from `vehicle_config.json` (`VehicleConfig.kt`), pushed to C++ via `setVehicleConfig`, **seeds** K-Means centroids → correct from first drive. K-Means refines centroids vs real `(f,v)` over time.
 4. **Classify + tolerance gate** (`classifyGear(r)`): nearest centroid, then asymmetric band `k_g·tolLow ≤ r ≤ k_g·tolHigh`. Wigo band **[0.98, 1.025]** (−2% / +2.5%, accommodates tire wear, load, pressure). Outside band for all gears → returns **−1/unknown** (no flicker mid-shift).
-5. **Needle** in `[0,1]` within gear band: `clamp((r − k_{g+1})/(k_g − k_{g+1}), 0, 1)`. Gears sorted descending. Zones: **0–33% blue (lugging → downshift)**, **33–66% green (optimal → hold)**, **66–100% red (redline → upshift)**. EMA smoothed α=0.18, resets to lug end when gear unknown.
+5. **Needle** in `[0,1]` within gear band: `clamp((r − k_{g+1})/(k_g − k_{g+1}), 0, 1)`. Gears sorted descending. Zones: **0–33% blue (lugging → downshift)**, **33–66% green (optimal → hold)**, **66–100% red (redline → upshift)**. EMA smoothed α=0.18, resets to lug end when gear unknown. The displayed gear passes through **ADR 008 `GearHysteresis`** (3 consecutive consistent `classifyGear` frames to commit; frozen while gravity-removed accel `g_linearAccelMag` > 2 m/s²) to kill 1 Hz-GPS twitch — display-stabilising only, not accuracy.
 6. **Quality gating (don't learn on noise):** GPS @ 1 Hz vs acoustic ~12 Hz misalign during accel/brake. Only feed a ratio to Welford/K-Means after GPS stable (Δ ≤ `speedJitterThresholdMps` 0.5 m/s) for `steadyStateWindowSeconds` (4 s) consecutive.
 
 - **Welford** (`CalibrationEngine.cpp`): tracks `n, mean, m2` of ratio. Variance `σ² = m2/n` = lock-confidence threshold. 3 floats persisted, no DB. Enables fragmented-session calibration.
 - **Oboe INPUT only:** mic PCM → lock-free SPSC ring → DSP worker → FFT. No output stream.
-- **Sensor thread:** raw `ASENSOR_TYPE_ACCELEROMETER` at fastest delivery (min-delay) via ALooper — shift-event detection (gravity-removed spike via EMA), ADR 004 M0 rate probe, and timestamped magnitude writes into the accel SPSC ring. (Was fused `LINEAR_ACCELERATION` @ 100 Hz pre-ADR-004; switched per DL-007.)
+- **Sensor thread:** raw `ASENSOR_TYPE_ACCELEROMETER` at fastest delivery (min-delay) via ALooper — shift-event detection (gravity-removed spike via EMA), the gravity-removed magnitude published to `g_linearAccelMag` (ADR 008 transient gate), ADR 004 M0 rate probe, and timestamped magnitude writes into the accel SPSC ring. (Was fused `LINEAR_ACCELERATION` @ 100 Hz pre-ADR-004; switched per DL-007.)
 
 ## Concurrency (C++)
 
@@ -94,7 +95,8 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 
 - **On-device validation (the one big gate, C-008):** ADR 004 M6 drive (probe ≥300 Hz, fusion vs mic-only, M5 harmonic guard on real chassis data) + ADR 006 M0 (audio cue doesn't contaminate the engine band / no xruns while the mic captures). Both need a physical arm64 device + the car. Use `gearsync-testdrive-fusion.apk` (fusion+cues on) + `adb logcat -s ShiftAssistant`.
 - Robust pitch detection on the **mic** path (HPS/YIN); the vibration path already has the M5 autocorrelation harmonic guard.
-- Rate-independent GPS time-alignment (ADR 007 salvage / possible ADR 008) — the NMEA rate path was rejected (A07/A56 cap NMEA at 1 Hz).
+- Rate-independent GPS `(f, v)` time-alignment (the ADR 007 salvage; still unbuilt) — the NMEA rate path was rejected (A07/A56 cap NMEA at 1 Hz). Note: **ADR 008 gear-display hysteresis is implemented** and handles the *visible* twitch separately; dead-reckoning was rejected (gravity-on-tilt).
+- UI: demo mode = **long-press Calibrate** (distinct double-buzz haptic vs the single-tap calibrate); `MainActivity` is locked to `sensorLandscape` for the wide 3:1 meter on a dash mount.
 - ADR 005 OBD-II oracle implementation (optional accessory, plan only) for calibration ground-truth.
 
 Done since earlier drafts (no longer open): launcher icons exist (adaptive `mipmap-anydpi-v26`); `onGearCalibrated` C++→Kt upcall is wired (`NativeEngine.calibrationListener`); guided per-gear RANSAC `CalibrationActivity` shipped.

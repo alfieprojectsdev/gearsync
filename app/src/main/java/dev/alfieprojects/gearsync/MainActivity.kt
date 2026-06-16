@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,7 +45,42 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnStart).setOnClickListener { checkAndStart() }
         findViewById<Button>(R.id.btnStop).setOnClickListener  { stopShiftService() }
-        findViewById<Button>(R.id.btnCalibrate).setOnClickListener { openCalibration() }
+
+        val calibrate = findViewById<Button>(R.id.btnCalibrate)
+        // Single tap → calibrate (one short buzz). Long-press → toggle the hidden
+        // demo mode (distinct double buzz), replacing the old VU-meter triple-tap.
+        calibrate.setOnClickListener {
+            vibrate(CALIBRATE_TAP_MS)
+            openCalibration()
+        }
+        calibrate.setOnLongClickListener {
+            NativeEngine.demoMode = !NativeEngine.demoMode
+            vibrateDemoToggle()
+            Toast.makeText(
+                this,
+                if (NativeEngine.demoMode) R.string.demo_on else R.string.demo_off,
+                Toast.LENGTH_SHORT
+            ).show()
+            true   // consume so the click (calibrate) does not also fire
+        }
+    }
+
+    // ─── Haptics ───────────────────────────────────────────────────────────────
+
+    private val vibrator: Vibrator? by lazy {
+        @Suppress("DEPRECATION")
+        getSystemService(VIBRATOR_SERVICE) as? Vibrator
+    }
+
+    private fun vibrate(ms: Long) {
+        vibrator?.takeIf { it.hasVibrator() }
+            ?.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
+    }
+
+    /** Distinct double-buzz so demo-toggle feels different from a calibrate tap. */
+    private fun vibrateDemoToggle() {
+        vibrator?.takeIf { it.hasVibrator() }
+            ?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), -1))
     }
 
     private fun checkAndStart() {
@@ -74,5 +111,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
         startActivity(Intent(this, CalibrationActivity::class.java))
+    }
+
+    private companion object {
+        const val CALIBRATE_TAP_MS = 30L
     }
 }

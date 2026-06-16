@@ -7,6 +7,7 @@
 #include "AccelVibrationDsp.h"
 #include "CalibrationEngine.h"
 #include "FusionPolicy.h"
+#include "GearHysteresis.h"
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +34,11 @@ static constexpr float MAX_ENGINE_HZ      = 250.0f;
 static constexpr float MIN_SPEED_MPS      = 1.0f;         // ignore GPS jitter below 1 m/s
 static constexpr float SHIFT_ACCEL_THRESH = 4.0f;         // m/s² spike → visual shift flash
 static constexpr int   SENSOR_US          = 10000;        // 100 Hz (fallback if min-delay unknown)
+// ADR 008 gear-display hysteresis: a classification must hold this many consecutive
+// DSP frames before it replaces the shown gear; while linear accel exceeds the
+// transient threshold (hard accel/brake → stale GPS v), the gear is held.
+static constexpr int   GEAR_STABLE_FRAMES   = 3;
+static constexpr float GEAR_TRANSIENT_ACCEL = 2.0f;      // m/s² gravity-removed
 
 // ─── ADR 004 M0 in-app accel-rate probe ──────────────────────────────────────
 // Requests raw ACCELEROMETER at fastest delivery and measures the rate/jitter our
@@ -72,6 +78,7 @@ static std::atomic<float>    g_dominantHz{0.0f};          // last FFT peak
 static std::atomic<float>    g_needlePos{0.0f};           // 0.0 (lug) … 1.0 (redline)
 static std::atomic<int>      g_currentGear{-1};           // 0-based gear index, -1 = unknown
 static std::atomic<bool>     g_shiftDetected{false};      // set by sensor thread; consumed by VU meter
+static std::atomic<float>    g_linearAccelMag{0.0f};      // ADR 008: gravity-removed |accel|, m/s²
 
 // ─── ADR 004 M0 probe stats (written by sensor thread, read via JNI diagnostic) ─
 static std::atomic<float>    g_accelEffHz{0.0f};          // measured effective rate, Hz
@@ -319,6 +326,7 @@ static void dspWorkerFn() {
     int accelWindowHead = 0;
     int accelWindowCount = 0;
     int accelSamplesSinceEstimate = 0;
+    GearHysteresis gearHysteresis;   // ADR 008: stabilises the displayed gear
 
     // Attach the DSP worker to the JVM for the lifetime of the thread.
     // A per-callback attach/detach would be cheaper in the no-lock case but risks
@@ -420,18 +428,31 @@ static void dspWorkerFn() {
                 }
             }
 
-            int gear = g_calibEngine.classifyGear(ratio);
+            // ADR 008: stabilise the displayed gear against 1 Hz-GPS twitch — require
+            // GEAR_STABLE_FRAMES consecutive consistent classifications, and freeze
+            // during high linear-accel transients (when v is stalest).
+            const int rawGear = g_calibEngine.classifyGear(ratio);
+            const bool transient =
+                g_linearAccelMag.load(std::memory_order_relaxed) > GEAR_TRANSIENT_ACCEL;
+            const int gear = gearHysteresis.update(rawGear, transient, GEAR_STABLE_FRAMES);
             g_currentGear.store(gear);
 
-            if (gear >= 0) {
+            // Needle must stay consistent with the *displayed* gear. Only re-derive it
+            // when the held gear matches the live classification and we're not in a
+            // transient — otherwise the live `ratio` may sit outside the held gear's
+            // band and the needle would peg to an extreme (a false "shift now") while
+            // the gear shows a stale number. In that case freeze the needle (hold the
+            // last good value) so gear and needle never contradict each other.
+            if (!transient && gear >= 0 && gear == rawGear) {
                 auto  ratios = g_calibEngine.getGearRatios();
                 float lo     = (gear < NUM_GEARS - 1) ? ratios[gear + 1] : ratios[gear] * 0.8f;
                 float hi     = ratios[gear];
                 float pos    = (hi - lo) > 1e-6f ? (ratio - lo) / (hi - lo) : 0.5f;
                 g_needlePos.store(std::max(0.0f, std::min(1.0f, pos)));
-            } else {
-                g_needlePos.store(0.0f);  // reset to lug end when gear is unknown
+            } else if (!transient && gear < 0) {
+                g_needlePos.store(0.0f);  // committed unknown (not a transient) → lug end
             }
+            // else: gear held vs. live classification, or transient → leave needle frozen.
         }
     }
 
@@ -618,7 +639,9 @@ static void sensorThreadFn() {
 
                 // Gravity-removed spike detection (raw accel includes ~9.81 g). (C-007)
                 gravityEma += 0.02f * (mag - gravityEma);
-                if (std::fabs(mag - gravityEma) > SHIFT_ACCEL_THRESH) {
+                const float linAccel = std::fabs(mag - gravityEma);
+                g_linearAccelMag.store(linAccel, std::memory_order_relaxed);  // ADR 008 transient gate
+                if (linAccel > SHIFT_ACCEL_THRESH) {
                     g_shiftDetected.store(true);
                 }
 
