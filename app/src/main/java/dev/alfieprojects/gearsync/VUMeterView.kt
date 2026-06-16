@@ -7,9 +7,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.Choreographer
-import android.view.MotionEvent
 import android.view.View
-import android.widget.Toast
 import kotlin.math.PI
 import kotlin.math.max
 import kotlin.math.sin
@@ -174,38 +172,9 @@ class VUMeterView @JvmOverloads constructor(
         }
     }
 
-    // ─── Hidden demo toggle: triple-tap the upper-right corner ───────────────
-    // Flips NativeEngine.demoMode so the meter animates from synthetic DebugSweep
-    // frames with no mic/GPS/sensors/service — works in any build (an easter-egg
-    // demo, not the `sweep` build type).
-
-    private var cornerTapCount = 0
-    private var lastCornerTapMs = 0L
-
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            val inCorner = event.x > width * CORNER_HIT_FRACTION &&
-                           event.y < height * CORNER_HIT_FRACTION
-            val now = System.currentTimeMillis()
-            if (inCorner) {
-                cornerTapCount =
-                    if (now - lastCornerTapMs <= TRIPLE_TAP_WINDOW_MS) cornerTapCount + 1 else 1
-                lastCornerTapMs = now
-                if (cornerTapCount >= 3) {
-                    cornerTapCount = 0
-                    NativeEngine.demoMode = !NativeEngine.demoMode
-                    Toast.makeText(
-                        context,
-                        if (NativeEngine.demoMode) R.string.demo_on else R.string.demo_off,
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-                return true
-            }
-            cornerTapCount = 0
-        }
-        return super.onTouchEvent(event)
-    }
+    // Demo mode (NativeEngine.demoMode) is toggled by a long-press on the
+    // Calibrate button in MainActivity; this view just renders whatever frames
+    // getVUMeterState() yields, synthetic or live.
 
     // ─── Drawing ─────────────────────────────────────────────────────────────
 
@@ -319,9 +288,6 @@ class VUMeterView @JvmOverloads constructor(
     }
 
     private companion object {
-        private const val CORNER_HIT_FRACTION = 0.75f   // upper-right quadrant beyond this
-        private const val TRIPLE_TAP_WINDOW_MS = 600L    // max gap between demo-toggle taps
-
         private const val SEGMENT_COUNT = 24
         private const val LUG_SEGMENTS = 8
         private const val OPT_SEGMENTS = 16

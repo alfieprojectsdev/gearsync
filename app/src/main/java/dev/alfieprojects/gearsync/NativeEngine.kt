@@ -51,10 +51,11 @@ object NativeEngine {
     @JvmStatic external fun nativeVibrationFusionStats(): FloatArray?
 
     /**
-     * Runtime demo toggle (triple-tap the upper-right corner of the VU meter).
-     * When on, feeds synthetic [DebugSweep] frames so the meter animates with no
-     * mic / GPS / sensors / running service — in ANY build. Independent of the
-     * compile-time `sweep` build type; off by default, so production is unchanged.
+     * Runtime demo toggle (long-press the Calibrate button — distinct double-buzz
+     * haptic vs. the single-tap calibrate). When on, feeds synthetic [DebugSweep]
+     * frames so the meter animates with no mic / GPS / sensors / running service —
+     * in ANY build. Independent of the compile-time `sweep` build type; off by
+     * default, so production is unchanged.
      */
     @Volatile @JvmStatic var demoMode: Boolean = false
 

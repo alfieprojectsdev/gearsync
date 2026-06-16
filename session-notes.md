@@ -373,3 +373,12 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - **CuePlayer crash guard:** `VUMeterView.maybePlayAudioCue` now try/catches CuePlayer construction + `play()` and latches a `cuesFailed` flag on any AudioTrack exception, so a failed opt-in extra can't repeatedly crash the 60 FPS render loop. Logs once.
 - Deferred (low priority): `NmeaSpeed.h` atof locale-sensitivity — it's ADR-007-rejected dead code; left as reference, flagged for deletion/strtof later.
 - Verified `testDebugUnitTest` 7/7 + `assembleDebug` BUILD SUCCESSFUL.
+
+---
+
+## Session 2026-06-16 — ADR 008 gear hysteresis + landscape + demo-trigger move
+
+- **ADR 008 (accepted, implemented):** kills the 1 Hz-GPS gear twitch (ADR 007 rate path dead). `GearHysteresis.h` (pure, host-tested 5/5): a classification must hold `GEAR_STABLE_FRAMES`=3 consecutive DSP frames before it replaces the shown gear; while gravity-removed accel `g_linearAccelMag` > `GEAR_TRANSIENT_ACCEL`=2 m/s² (hard accel/brake, v stalest) the committed gear is frozen + candidate count reset. Reuses the gravity EMA the shift detector already computes — no new sensor/JNI/alloc. Wired at the `classifyGear`→`g_currentGear` store in `dspWorkerFn`. **Rejected** inertial dead-reckoning (∫a dt): gravity on a tilted dash mount swamps real ~1-2 m/s² motion → integrated v dominated by tilt, worse than holding last-GPS; OBD-II (ADR 005) is the real accuracy lever. Display-stabilising only, not accuracy.
+- **Demo-trigger moved:** VU-meter upper-right triple-tap → **long-press the Calibrate button** (more discoverable). Single tap = calibrate (30 ms buzz); long-press = toggle demo (distinct double-buzz `createWaveform([0,40,60,40])`). Added `VIBRATE` permission; removed `VUMeterView.onTouchEvent` + corner consts; `NativeEngine.demoMode` doc updated.
+- **Landscape lock:** `MainActivity` → `android:screenOrientation="sensorLandscape"` so the wide 3:1 VU meter uses the full width on a dash mount (both landscape flips allowed).
+- Verified: gear-hysteresis host 5/5, fusion/accel/ransac host tests pass, `testDebugUnitTest` (CueState) pass, `./gradlew assembleDebug` BUILD SUCCESSFUL. Docs synced (adr.md ADR 008, CLAUDE.md layout/mechanics/sensor/open-items, README transient limitation).
