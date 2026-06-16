@@ -44,6 +44,7 @@
             android:name=".CalibrationActivity"
             android:exported="false"
             android:label="@string/btn_calibrate"
+            android:screenOrientation="sensorLandscape"
             android:windowSoftInputMode="stateHidden" />
 
         <service

@@ -57,6 +57,28 @@ int main() {
         std::printf("PASS passthrough_when_n_is_1\n");
     }
 
+    // A single stray "unknown" (-1) frame (mid-shift/declutch) does not drop the
+    // committed gear; a *sustained* run of -1 commits to unknown after N frames.
+    {
+        GearHysteresis h;
+        for (int i = 0; i < N; ++i) h.update(2, false, N);   // committed = 2
+        assert(h.update(-1, false, N) == 2);   // one stray unknown → still 2
+        assert(h.update(2, false, N) == 2);    // back to 2
+        assert(h.update(-1, false, N) == 2);   // sustained unknown begins, count 1
+        assert(h.update(-1, false, N) == 2);   // count 2
+        assert(h.update(-1, false, N) == -1);  // count 3 → commit unknown
+        std::printf("PASS unknown_flip_rejected_then_sustained_commits\n");
+    }
+
+    // From committed unknown, a sustained real gear commits normally.
+    {
+        GearHysteresis h;   // committed starts at -1
+        assert(h.update(3, false, N) == -1);
+        assert(h.update(3, false, N) == -1);
+        assert(h.update(3, false, N) == 3);    // sustained → commit 3
+        std::printf("PASS recovers_from_unknown_to_gear\n");
+    }
+
     std::printf("All gear hysteresis tests passed.\n");
     return 0;
 }

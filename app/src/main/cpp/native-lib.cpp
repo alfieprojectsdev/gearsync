@@ -437,15 +437,22 @@ static void dspWorkerFn() {
             const int gear = gearHysteresis.update(rawGear, transient, GEAR_STABLE_FRAMES);
             g_currentGear.store(gear);
 
-            if (gear >= 0) {
+            // Needle must stay consistent with the *displayed* gear. Only re-derive it
+            // when the held gear matches the live classification and we're not in a
+            // transient — otherwise the live `ratio` may sit outside the held gear's
+            // band and the needle would peg to an extreme (a false "shift now") while
+            // the gear shows a stale number. In that case freeze the needle (hold the
+            // last good value) so gear and needle never contradict each other.
+            if (!transient && gear >= 0 && gear == rawGear) {
                 auto  ratios = g_calibEngine.getGearRatios();
                 float lo     = (gear < NUM_GEARS - 1) ? ratios[gear + 1] : ratios[gear] * 0.8f;
                 float hi     = ratios[gear];
                 float pos    = (hi - lo) > 1e-6f ? (ratio - lo) / (hi - lo) : 0.5f;
                 g_needlePos.store(std::max(0.0f, std::min(1.0f, pos)));
-            } else {
-                g_needlePos.store(0.0f);  // reset to lug end when gear is unknown
+            } else if (!transient && gear < 0) {
+                g_needlePos.store(0.0f);  // committed unknown (not a transient) → lug end
             }
+            // else: gear held vs. live classification, or transient → leave needle frozen.
         }
     }
 
