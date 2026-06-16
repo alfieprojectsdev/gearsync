@@ -12,3 +12,8 @@ captures/
 
 # OS
 .DS_Store
+
+# Build artifacts — never commit binaries; distribute via GitHub Releases
+# (reproducible from source, and APKs bloat git history / don't delta-compress).
+*.apk
+gearsync-testdrive-fusion.pdf
