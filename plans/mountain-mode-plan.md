@@ -83,11 +83,11 @@ Her drive is the ground truth, the same role ADR 005 gives an OBD adapter for RP
 
 Mode 2 is the more valuable dataset because it captures her judgment about your driving, including the times she would have spoken and the times she let it go.
 
-Throttle phase without a throttle sensor: net propulsive accel = measured longitudinal accel − g·sin θ − rolling and drag terms. Clearly positive is BUILD/FLOOR, near zero is HOLD, negative but small is EASE or engine braking, strongly negative is BRAKE.
+Throttle phase without a throttle sensor: net propulsive accel = `dv/dt + g·sin θ` + rolling and drag terms. The forward accelerometer axis already reads `dv/dt + g·sin θ`, so in practice it's the measured longitudinal accel plus rolling and drag. Clearly positive is BUILD/FLOOR, near zero is HOLD, negative but small is EASE or engine braking, strongly negative is BRAKE.
 
 ## Vehicle model and gear advisor
 
-Wheel RPM to engine RPM from `vehicle_config.json` (`ratios`, `finalDriveRatio`, `nominalCircumferenceMeters` = 1.816 m):
+Road speed to engine RPM from `vehicle_config.json` (`ratios`, `finalDriveRatio`, `nominalCircumferenceMeters` = 1.816 m):
 
 | Speed | 1st | 2nd | 3rd | 4th |
 |---|---|---|---|---|
@@ -108,7 +108,7 @@ The 1KR-FE's peak torque is roughly 90 Nm (confirm against the spec sheet) and i
 
 Uphill rule: for the corner ahead, predict the minimum speed (from the reference run, or from `v = √(a_budget / κ)` without one), then pick the highest gear whose RPM at that speed is above a floor and whose torque margin at the predicted grade exceeds a threshold. Show that gear before the brake point.
 
-Downhill rule: retarding power needed is `m·g·sin θ·v` minus rolling and drag. Engine braking per gear comes from a coast-down test (M0). Whatever is left is brake work. Integrate it with a simple first-order cooling term into a brake-heat index; when it climbs on a long descent, cue a downshift. This replaces the folk rule "go down in the gear you'd climb in" with the same idea computed from the actual grade.
+Downhill rule: retarding power needed is `m·v·(g·sin|θ| − dv/dt)` minus rolling and drag, so speed the driver lets build up isn't counted as brake work. Engine braking per gear comes from a coast-down test (M0). Whatever is left is brake work. Integrate it with a simple first-order cooling term into a brake-heat index; when it climbs on a long descent, cue a downshift. This replaces the folk rule "go down in the gear you'd climb in" with the same idea computed from the actual grade.
 
 Additional config fields needed: loaded mass, a torque curve (a handful of RPM/Nm points), an RPM floor and ceiling for advice, and the per-gear engine-braking curve from M0.
 
@@ -116,10 +116,10 @@ Additional config fields needed: loaded mass, a torque curve (a handful of RPM/N
 
 A pure state machine (same pattern as `CueState.kt`) takes fused state plus the route lookahead and emits at most one phase cue and one target gear. Lead time is distance-based: cue at `v·t_lead` ahead of the feature, starting with `t_lead` = 3 s, tuned against her tap timings.
 
-Gates that suppress every cue:
+Gates:
 
-- Map-match confidence below threshold (position ambiguous between switchback legs, or off-route).
-- Speed above the reference run's speed at this `s`.
+- Map-match confidence below threshold (position ambiguous between switchback legs, or off-route) suppresses every cue.
+- Speed above the reference run's speed at this `s` suppresses BUILD and FLOOR; EASE and BRAKE stay live, since that's when they're needed.
 - FLOOR unless yaw rate is falling, curvature ahead is decreasing, grade is positive, and the next corner is beyond a minimum distance.
 - BRAKE while lateral accel exceeds half the budget.
 - Any cue within a cooldown of the last one, so the driver isn't flooded in a run of switchbacks.
@@ -137,7 +137,7 @@ Each milestone ends in something checkable. Device-free work first, following th
 - M0 instrumented ride-along. Logger for full GPS `Location`, raw accel, gyro, barometer if present, mic `f` if enabled; passenger tap panel; export via `adb`. Coast-down tests on a flat road in neutral (rolling and drag) and on a known grade in each gear with throttle closed (engine braking). Done when there are logged runs of the target route covering at least two ascents and two descents in each recording mode, and the barometer question is answered for the actual phone.
 - M1 mount calibration. Gravity vector at rest gives "down", the first straight-line acceleration gives "forward". Done when a host test on M0 logs recovers grade on a known straight within a stated error.
 - M2 route builder. `scripts/` tool: OSM corridor + DEM → route file with `s`, `z`, grade, `κ`, corners. Done when its grade and corner list are compared against the M0 driven profile and the error is reported per corner.
-- M3 state estimator. Map-matching with heading, fused grade, curvature from gyro, throttle phase. Runs at about 10 Hz, so it can live in Kotlin and be JVM-tested by replaying M0 logs; no JNI parity change needed. Done when replayed logs produce stable `s`, grade and phase with no switchback mis-matches.
+- M3 state estimator. Map-matching with heading, fused grade, curvature from gyro, throttle phase. Runs at about 10 Hz, so it can live in Kotlin and be JVM-tested by replaying M0 logs. It needs its own low-rate Kotlin `SensorManager` listeners for accel, gyro and barometer (the native thread's 399 Hz accel stream stays dedicated to vibration DSP), which keeps the JNI surface unchanged. Done when replayed logs produce stable `s`, grade and phase with no switchback mis-matches.
 - M4 vehicle model and gear advisor. Done when, replayed over her runs, the advised gear matches the gear she used through each hairpin, with every disagreement listed.
 - M5 cue policy in shadow mode. Cues are computed and logged but not shown. Scored against her taps: per-cue precision and recall, and median lead-time difference. Done when the numbers are good enough that she agrees to try them live.
 - M6 display and audio, ADR 009 written. Done when a demo-mode replay of a logged run plays the cues end to end.
