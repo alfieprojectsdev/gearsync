@@ -89,7 +89,7 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 - UI strings → `strings.xml`, colors → `colors.xml`. No hardcoded literals.
 - VUMeterView: pause Choreographer when not visible (`isRunning` flag, `onVisibilityChanged`).
 - New vehicle = edit `vehicle_config.json`, no recompile.
-- Workflow + session log: branch for implementation, open PR, request CodeRabbit review, never commit directly to `main`, and append to `session-notes.md`. For parallel agent work, prefer worktrees under `/home/finch/repos/gearsync/worktrees/`.
+- Workflow + session log: branch for implementation, open PR, run `/code-review medium|high --fix` on it (CodeRabbit is disabled; medium for docs-only, high for code), push the fixes and merge without asking, never commit directly to `main`, and append to `session-notes.md`. For parallel agent work, prefer worktrees under `/home/finch/repos/gearsync/worktrees/`.
 
 ## Open items (see session-notes.md / README Current Limitations)
 
