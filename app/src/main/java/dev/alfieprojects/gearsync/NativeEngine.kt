@@ -73,8 +73,28 @@ object NativeEngine {
      * default off, so normal production behavior is unchanged.
      */
     @JvmStatic
-    fun getVUMeterState(): FloatArray? =
-        if (BuildConfig.VU_SWEEP || demoMode) DebugSweep.nextFrame() else nativeVUMeterState()
+    fun getVUMeterState(): FloatArray? {
+        if (BuildConfig.VU_SWEEP || demoMode) return DebugSweep.nextFrame()
+        val v = nativeVUMeterState() ?: return null
+        // Hand over a shift event a peekVUMeterState() caller consumed natively.
+        if (pendingShift.getAndSet(false) && v.size > SHIFT_INDEX) v[SHIFT_INDEX] = 1f
+        return v
+    }
+
+    /**
+     * Native VU state for secondary readers (ride logger, diagnostics) that must
+     * not steal the one-shot shift flag from the VU meter: the native call clears
+     * it, so a consumed event is parked and re-delivered by [getVUMeterState].
+     */
+    @JvmStatic
+    fun peekVUMeterState(): FloatArray? {
+        val v = nativeVUMeterState() ?: return null
+        if (v.size > SHIFT_INDEX && v[SHIFT_INDEX] != 0f) pendingShift.set(true)
+        return v
+    }
+
+    private const val SHIFT_INDEX = 5
+    private val pendingShift = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /**
      * Restore Welford + gear-ratio state from a previous session.

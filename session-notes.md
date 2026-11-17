@@ -384,3 +384,12 @@ Continuation of the branch + PR + CodeRabbit flow. Merge/`gh` writes are sandbox
 - Verified: gear-hysteresis host 5/5, fusion/accel/ransac host tests pass, `testDebugUnitTest` (CueState) pass, `./gradlew assembleDebug` BUILD SUCCESSFUL. Docs synced (adr.md ADR 008, CLAUDE.md layout/mechanics/sensor/open-items, README transient limitation).
 
 - **Quality-reviewer pass on PR #30 → 3 fixes applied:** (1) needle/gear consistency — `g_needlePos` now only re-derives when the held gear matches the live classification and not in a transient; otherwise the needle freezes (was: could peg to redline while gear showed a stale number = false "shift now"). (2) Added unknown(-1) hysteresis host tests (stray -1 rejected, sustained -1 → unknown, recovery from unknown) → 7/7. (3) `CalibrationActivity` also locked to `sensorLandscape`. Deferred nit: Vibrator uses deprecated `VIBRATOR_SERVICE` (works on API 26–34 w/ @Suppress).
+
+---
+
+## Session 2026-11-17 — mountain-mode plan + M0 ride-along logger
+
+- Refocus proposal: `plans/mountain-mode-plan.md` (PR #32, merged). Codifies an experienced Baguio-roads driver's cues as racing/rally concepts; gear/phase advice from GPS + fused grade (DEM, baro, accel pitch) + gyro curvature, mic optional.
+- Workflow change: CodeRabbit disabled. PRs get `/code-review medium|high --fix`, then merge without asking (CLAUDE.md updated).
+- M0 built: `RideLogFormat.kt` (pure CSV contract, JVM-tested), `RideLogService.kt` (location FGS, own HandlerThread; GPS_PROVIDER 1 Hz, accel+gyro 100 Hz, baro, labels, engine state only when ShiftAssistantService runs and demo is off), `RideLogActivity.kt` (passenger panel: Build/Hold/Ease/Floor/Brake, gears 1–5, Mark, Undo; 3 modes). No JNI change (12↔12). Procedure + format in `docs/RIDE-ALONG.md`.
+- Not done: the drives themselves, coast-down runs, and confirming barometer presence on the real phone.

@@ -41,7 +41,10 @@ app/src/main/java/dev/alfieprojects/gearsync/
   CueState.kt              ADR 006 M1 pure zone-transition → cue-intent state machine
   CuePlayer.kt             ADR 006 M2 Shared/normal-latency AudioTrack out-of-band chirp player
   MainActivity.kt          permission gating + service control
-app/src/test/java/…/       JVM unit tests for pure Kotlin logic (CueStateTest) — `./gradlew testDebugUnitTest`
+  RideLogFormat.kt         mountain-mode M0 pure CSV contract (streams, labels, modes)
+  RideLogService.kt        M0 ride-along logger: GPS_PROVIDER fixes, 100 Hz accel+gyro, baro, labels → CSV; no JNI
+  RideLogActivity.kt       M0 passenger tap panel (docs/RIDE-ALONG.md)
+app/src/test/java/…/       JVM unit tests for pure Kotlin logic (CueStateTest, RideLogFormatTest) — `./gradlew testDebugUnitTest`
 app/src/main/assets/vehicle_config.json   per-vehicle profile (ships tuned for Toyota Wigo 1.0 E M/T)
 docs (root):               README.md adr.md specs.md prompt.md references.md session-notes.md
 ```
@@ -73,7 +76,7 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 |---|---|---|---|
 | `startEngine()` / `stopEngine()` | Kt→C++ | Service create/destroy | once |
 | `updateGpsSpeed(float)` | Kt→C++ | Service location cb | 1 Hz |
-| `nativeVUMeterState(): FloatArray` | C++→Kt | VUMeterView (via `getVUMeterState` wrapper) | 60 Hz |
+| `nativeVUMeterState(): FloatArray` | C++→Kt | VUMeterView (via `getVUMeterState` wrapper; secondary readers use `peekVUMeterState`) | 60 Hz |
 | `nativeAccelProbeStats(): FloatArray` | C++→Kt | ADR 004 M0 diagnostic | on demand |
 | `nativeVibrationFusionStats(): FloatArray` | C++→Kt | ADR 004 diagnostic | on demand |
 | `resumeCalibrationState(FloatArray)` | Kt→C++ | Service.onCreate | once |

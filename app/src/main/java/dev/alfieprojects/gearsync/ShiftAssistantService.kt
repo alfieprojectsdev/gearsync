@@ -71,7 +71,7 @@ class ShiftAssistantService : Service() {
     private fun logDriveDiagnostics() {
         val f = NativeEngine.nativeVibrationFusionStats() ?: return
         if (f.size < 8) return
-        val vu = NativeEngine.getVUMeterState()
+        val vu = NativeEngine.peekVUMeterState()   // don't steal the VU meter's shift flash
         val needle = vu?.getOrNull(0) ?: 0f
         val micHz  = vu?.getOrNull(1) ?: 0f
         val speed  = vu?.getOrNull(2) ?: 0f

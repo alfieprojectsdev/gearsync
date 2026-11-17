@@ -9,4 +9,17 @@
         <item name="android:statusBarColor">#0D0D1A</item>
         <item name="android:navigationBarColor">#0D0D1A</item>
     </style>
+
+    <!-- Mountain-mode M0 passenger tap panel: big, equal-width, fills the row. -->
+    <style name="RideLogButton" parent="Widget.MaterialComponents.Button">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:layout_margin">4dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:textSize">22sp</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:textColor">@color/ridelog_text</item>
+    </style>
 </resources>

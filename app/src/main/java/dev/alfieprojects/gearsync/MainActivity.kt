@@ -45,6 +45,9 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnStart).setOnClickListener { checkAndStart() }
         findViewById<Button>(R.id.btnStop).setOnClickListener  { stopShiftService() }
+        findViewById<Button>(R.id.btnRideLog).setOnClickListener {
+            startActivity(Intent(this, RideLogActivity::class.java))
+        }
 
         val calibrate = findViewById<Button>(R.id.btnCalibrate)
         // Single tap → calibrate (one short buzz). Long-press → toggle the hidden

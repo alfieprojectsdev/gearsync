@@ -1,6 +1,6 @@
 # Mountain mode plan: codifying a co-driver for mountain roads
 
-Status: proposal, nothing built. Would become ADR 009 if accepted.
+Status: proposal. Would become ADR 009 if accepted. M0 logger built (`RideLogService`, docs/RIDE-ALONG.md); the M0 drives haven't happened yet.
 
 ## Why refocus
 

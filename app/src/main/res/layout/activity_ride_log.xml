@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Mountain-mode M0 passenger tap panel (landscape). Rows, top to bottom: live
+  status, phase labels, absolute gear labels, controls. Buttons are large because
+  the passenger taps a dash-mounted phone on a winding road.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="8dp"
+    android:background="@color/background_dark">
+
+    <TextView
+        android:id="@+id/tvRideStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="4dp"
+        android:textColor="@color/ridelog_status_idle"
+        android:textSize="13sp" />
+
+    <LinearLayout
+        android:id="@+id/phaseRow"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="3"
+        android:orientation="horizontal">
+
+        <Button android:id="@+id/btnBuild" style="@style/RideLogButton"
+            android:text="@string/ridelog_label_build" android:backgroundTint="@color/ridelog_build" />
+        <Button android:id="@+id/btnHold" style="@style/RideLogButton"
+            android:text="@string/ridelog_label_hold" android:backgroundTint="@color/ridelog_hold" />
+        <Button android:id="@+id/btnEase" style="@style/RideLogButton"
+            android:text="@string/ridelog_label_ease" android:backgroundTint="@color/ridelog_ease" />
+        <Button android:id="@+id/btnFloor" style="@style/RideLogButton"
+            android:text="@string/ridelog_label_floor" android:backgroundTint="@color/ridelog_floor" />
+        <Button android:id="@+id/btnBrake" style="@style/RideLogButton"
+            android:text="@string/ridelog_label_brake" android:backgroundTint="@color/ridelog_brake" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/gearRow"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="2"
+        android:orientation="horizontal">
+
+        <Button android:id="@+id/btnRideGear1" style="@style/RideLogButton"
+            android:text="@string/gear_label_1" android:backgroundTint="@color/ridelog_gear" />
+        <Button android:id="@+id/btnRideGear2" style="@style/RideLogButton"
+            android:text="@string/gear_label_2" android:backgroundTint="@color/ridelog_gear" />
+        <Button android:id="@+id/btnRideGear3" style="@style/RideLogButton"
+            android:text="@string/gear_label_3" android:backgroundTint="@color/ridelog_gear" />
+        <Button android:id="@+id/btnRideGear4" style="@style/RideLogButton"
+            android:text="@string/gear_label_4" android:backgroundTint="@color/ridelog_gear" />
+        <Button android:id="@+id/btnRideGear5" style="@style/RideLogButton"
+            android:text="@string/gear_label_5" android:backgroundTint="@color/ridelog_gear" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/rideControlRow"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1.2"
+        android:orientation="horizontal">
+
+        <Button android:id="@+id/btnMark" style="@style/RideLogButton"
+            android:text="@string/ridelog_btn_mark" android:backgroundTint="@color/ridelog_aux" />
+        <Button android:id="@+id/btnUndo" style="@style/RideLogButton"
+            android:text="@string/ridelog_btn_undo" android:backgroundTint="@color/ridelog_aux" />
+        <Button android:id="@+id/btnRideMode" style="@style/RideLogButton"
+            android:layout_weight="1.6"
+            android:backgroundTint="@color/ridelog_aux" />
+        <Button android:id="@+id/btnRideStartStop" style="@style/RideLogButton"
+            android:layout_weight="1.4"
+            android:backgroundTint="@color/button_start" />
+    </LinearLayout>
+
+</LinearLayout>

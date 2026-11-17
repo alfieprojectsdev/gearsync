@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mountain-mode M0 passenger tap panel. Phase colors are distinct hues so a
+     passenger can hit the right button by color without reading. -->
+<resources>
+    <color name="ridelog_text">#FFFFFF</color>
+    <color name="ridelog_status_idle">#9AA3B5</color>
+    <color name="ridelog_status_rec">#FF5252</color>
+    <color name="ridelog_build">#27AE60</color>
+    <color name="ridelog_hold">#16A085</color>
+    <color name="ridelog_ease">#F39C12</color>
+    <color name="ridelog_floor">#8E44AD</color>
+    <color name="ridelog_brake">#C0392B</color>
+    <color name="ridelog_gear">#2980B9</color>
+    <color name="ridelog_aux">#4A5068</color>
+</resources>
