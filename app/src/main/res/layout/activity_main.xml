@@ -58,6 +58,16 @@
             android:text="@string/btn_calibrate"
             android:backgroundTint="@color/calib_gear_button" />
 
+        <!-- Mountain-mode M0 ride-along logger; independent of Start/Stop. -->
+        <Button
+            android:id="@+id/btnRideLog"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="56dp"
+            android:layout_marginStart="8dp"
+            android:text="@string/btn_ride_log"
+            android:backgroundTint="@color/ridelog_aux" />
+
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

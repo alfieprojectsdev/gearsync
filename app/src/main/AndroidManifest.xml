@@ -15,6 +15,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Distinct haptics: single buzz on Calibrate tap, double buzz on demo long-press. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Mountain-mode M0 ride-along logger: keep sensors delivering with the screen off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
     <uses-feature android:name="android.hardware.microphone"            android:required="true" />
@@ -51,6 +53,20 @@
             android:name=".ShiftAssistantService"
             android:exported="false"
             android:foregroundServiceType="microphone|location" />
+
+        <!-- Mountain-mode M0 ride-along logger (docs/RIDE-ALONG.md). Location-only
+             foreground service; runs alongside or without ShiftAssistantService. -->
+        <activity
+            android:name=".RideLogActivity"
+            android:exported="false"
+            android:label="@string/btn_ride_log"
+            android:screenOrientation="sensorLandscape"
+            android:windowSoftInputMode="stateHidden" />
+
+        <service
+            android:name=".RideLogService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
 
     </application>
 </manifest>
