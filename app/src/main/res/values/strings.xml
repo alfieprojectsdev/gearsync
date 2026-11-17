@@ -44,6 +44,7 @@
     <string name="ridelog_status_error">\nerror: %1$s</string>
     <string name="ridelog_none">none</string>
     <string name="ridelog_absent">absent</string>
+    <string name="ridelog_unknown">?</string>
     <string name="ridelog_last_label">%1$s %2$ds ago</string>
     <string name="ridelog_permissions_required">Precise location is required to log</string>
     <string name="ridelog_err_no_location">Location permission not granted</string>

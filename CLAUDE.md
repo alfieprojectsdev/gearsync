@@ -76,7 +76,7 @@ Audio input callback (real-time prio) + sensor ALooper + DSP worker. DSP is OUT 
 |---|---|---|---|
 | `startEngine()` / `stopEngine()` | Kt→C++ | Service create/destroy | once |
 | `updateGpsSpeed(float)` | Kt→C++ | Service location cb | 1 Hz |
-| `nativeVUMeterState(): FloatArray` | C++→Kt | VUMeterView (via `getVUMeterState` wrapper) | 60 Hz |
+| `nativeVUMeterState(): FloatArray` | C++→Kt | VUMeterView (via `getVUMeterState` wrapper; secondary readers use `peekVUMeterState`) | 60 Hz |
 | `nativeAccelProbeStats(): FloatArray` | C++→Kt | ADR 004 M0 diagnostic | on demand |
 | `nativeVibrationFusionStats(): FloatArray` | C++→Kt | ADR 004 diagnostic | on demand |
 | `resumeCalibrationState(FloatArray)` | Kt→C++ | Service.onCreate | once |

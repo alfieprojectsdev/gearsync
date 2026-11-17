@@ -4,7 +4,6 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.util.Locale
@@ -39,7 +38,7 @@ class RideLogFormatTest {
         Locale.setDefault(Locale.GERMANY)   // formats 1.5 as "1,5" if Locale.ROOT is not used
         val row = RideLogFormat.imuRow(5L, 6L, RideLogFormat.IMU_GYRO, 1.5f, -0.25f, 0f)
         assertEquals(RideLogFormat.IMU_HEADER.size, fields(row).size)
-        assertTrue(row.contains("1.50000"))
+        assertEquals("5,6,G,1.5,-0.25,0.0", row)
         val gps = RideLogFormat.gpsRow(1L, 2L, "gps", 16.5, 120.5, null, null, null, null, null, null, null, null)
         assertEquals(RideLogFormat.GPS_HEADER.size, fields(gps).size)
     }

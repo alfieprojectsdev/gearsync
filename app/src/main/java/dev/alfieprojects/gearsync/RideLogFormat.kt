@@ -51,7 +51,12 @@ object RideLogFormat {
     fun num(v: Double?): String =
         if (v == null || v.isNaN() || v.isInfinite()) "" else String.format(Locale.ROOT, "%.7g", v)
 
-    fun num(v: Float?): String = num(v?.toDouble())
+    /**
+     * Float.toString is locale-independent and far cheaper than String.format on
+     * the ~600 values/s IMU path. It may emit "1.0E-5"; standard CSV readers parse it.
+     */
+    fun num(v: Float?): String =
+        if (v == null || v.isNaN() || v.isInfinite()) "" else v.toString()
 
     /** Lat/lon need fixed decimals: %.7g would drop to ~1 m resolution at 3-digit longitudes. */
     fun coord(v: Double): String = String.format(Locale.ROOT, "%.8f", v)

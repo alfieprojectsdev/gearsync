@@ -123,7 +123,10 @@ class RideLogActivity : AppCompatActivity() {
         val intent = Intent(this, RideLogService::class.java)
             .setAction(RideLogService.ACTION_START)
             .putExtra(RideLogService.EXTRA_MODE, mode.code)
-        ContextCompat.startForegroundService(this, intent)
+        // Plain startService: this activity is in the foreground, so the service may
+        // promote itself with startForeground. startForegroundService would crash the
+        // app if the service has to stop before promoting (e.g. permission revoked).
+        startService(intent)
     }
 
     private fun stopLog() {
@@ -159,7 +162,7 @@ class RideLogActivity : AppCompatActivity() {
             lastAccel = s.accelSamples; lastGyro = s.gyroSamples; lastRefreshNs = now
 
             val elapsedS = ((now - s.startNs) / 1_000_000_000L).coerceAtLeast(0)
-            val acc = if (s.lastHAccM.isNaN()) "?" else String.format(Locale.ROOT, "%.0f", s.lastHAccM)
+            val acc = if (s.lastHAccM.isNaN()) getString(R.string.ridelog_unknown) else String.format(Locale.ROOT, "%.0f", s.lastHAccM)
             val baro = if (s.hasBaro) s.baroSamples.toString() else getString(R.string.ridelog_absent)
             val last = s.lastLabel?.let {
                 getString(R.string.ridelog_last_label, it, ((now - s.lastLabelNs) / 1_000_000_000L).toInt())

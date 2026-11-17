@@ -148,11 +148,14 @@ class RideLogService : Service() {
     private fun stopRecording() {
         val thread = logThread ?: return
         val handler = logHandler!!
-        sensorManager.unregisterListener(sensorListener)
-        locationManager.removeUpdates(locationListener)
-        handler.removeCallbacks(flushTick)
-        handler.removeCallbacks(engineTick)
+        // Unregister on the log thread, queued after the start post: if Stop lands
+        // before registerStreams has run, unregistering here on main would happen
+        // first and the late registration would leak onto a dead looper.
         handler.post {
+            sensorManager.unregisterListener(sensorListener)
+            locationManager.removeUpdates(locationListener)
+            handler.removeCallbacks(flushTick)
+            handler.removeCallbacks(engineTick)
             session?.close(System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos())
             session = null
             Stats.recording = false
@@ -176,12 +179,12 @@ class RideLogService : Service() {
         Stats.hasGyro = gyro != null
         Stats.hasBaro = baro != null
 
-        if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-            // Raw GNSS fixes (Doppler speed), not the fused provider's smoothed speed (ADR 007).
-            locationManager.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER, GPS_INTERVAL_MS, 0f, locationListener, handler.looper
-            )
-        } else {
+        // Raw GNSS fixes (Doppler speed), not the fused provider's smoothed speed (ADR 007).
+        // Requested even when GPS is off, so fixes start as soon as it's switched on.
+        locationManager.requestLocationUpdates(
+            LocationManager.GPS_PROVIDER, GPS_INTERVAL_MS, 0f, locationListener, handler.looper
+        )
+        if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
             Stats.error = getString(R.string.ridelog_err_gps_off)
         }
     }
@@ -207,8 +210,12 @@ class RideLogService : Service() {
     // provider/status methods, which have no default implementation there.
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) { session?.gps(location) }
-        override fun onProviderEnabled(provider: String) = Unit
-        override fun onProviderDisabled(provider: String) = Unit
+        override fun onProviderEnabled(provider: String) {
+            if (Stats.error == getString(R.string.ridelog_err_gps_off)) Stats.error = null
+        }
+        override fun onProviderDisabled(provider: String) {
+            Stats.error = getString(R.string.ridelog_err_gps_off)
+        }
         @Deprecated("Deprecated in API 29")
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) = Unit
     }
@@ -224,7 +231,7 @@ class RideLogService : Service() {
     private val engineTick = object : Runnable {
         override fun run() {
             if (ShiftAssistantService.isRunning && !NativeEngine.demoMode && !BuildConfig.VU_SWEEP) {
-                NativeEngine.nativeVUMeterState()?.let { v ->
+                NativeEngine.peekVUMeterState()?.let { v ->
                     if (v.size >= 5) session?.engine(SystemClock.elapsedRealtimeNanos(), v)
                 }
             }
@@ -240,24 +247,36 @@ class RideLogService : Service() {
         private val startEpochMs: Long,
         private val startNs: Long
     ) {
-        private val gpsOut    = open(RideLogFormat.GPS_FILE, RideLogFormat.GPS_HEADER)
-        private val imuOut    = open(RideLogFormat.IMU_FILE, RideLogFormat.IMU_HEADER)
-        private val baroOut   = open(RideLogFormat.BARO_FILE, RideLogFormat.BARO_HEADER)
-        private val labelOut  = open(RideLogFormat.LABEL_FILE, RideLogFormat.LABEL_HEADER)
-        private val engineOut = open(RideLogFormat.ENGINE_FILE, RideLogFormat.ENGINE_HEADER)
-        private val writers = listOf(gpsOut, imuOut, baroOut, labelOut, engineOut)
+        private val writers = mutableListOf<BufferedWriter>()
+        private val gpsOut: BufferedWriter
+        private val imuOut: BufferedWriter
+        private val baroOut: BufferedWriter
+        private val labelOut: BufferedWriter
+        private val engineOut: BufferedWriter
         private var failed = false
 
         init {
+            try {
+                gpsOut    = open(RideLogFormat.GPS_FILE, RideLogFormat.GPS_HEADER)
+                imuOut    = open(RideLogFormat.IMU_FILE, RideLogFormat.IMU_HEADER)
+                baroOut   = open(RideLogFormat.BARO_FILE, RideLogFormat.BARO_HEADER)
+                labelOut  = open(RideLogFormat.LABEL_FILE, RideLogFormat.LABEL_HEADER)
+                engineOut = open(RideLogFormat.ENGINE_FILE, RideLogFormat.ENGINE_HEADER)
+            } catch (e: IOException) {
+                // Don't leak the files that did open before the failure.
+                writers.forEach { w -> try { w.close() } catch (_: IOException) { } }
+                throw e
+            }
             Stats.reset(dir.name, dir.absolutePath, startNs)
             writeMeta(endEpochMs = null, endNs = null)
         }
 
         private fun open(name: String, header: List<String>): BufferedWriter {
             if (!dir.exists() && !dir.mkdirs()) throw IOException("mkdirs failed: $dir")
-            return BufferedWriter(FileWriter(File(dir, name)), WRITE_BUFFER_BYTES).apply {
-                write(RideLogFormat.header(header)); newLine()
-            }
+            val w = BufferedWriter(FileWriter(File(dir, name)), WRITE_BUFFER_BYTES)
+            writers += w
+            w.write(RideLogFormat.header(header)); w.newLine()
+            return w
         }
 
         private inline fun append(out: BufferedWriter, row: () -> String) {
